@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Trading CMD">
+  <meta name="theme-color" content="#F0A500">
+  <title>Trading CMD v3</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon.png">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080B14; font-family: 'Courier New', monospace; }
+    #root { min-height: 100vh; }
+    select option { background: #0D1321; color: #E8EAF0; }
+    textarea::placeholder { color: #2D3748; }
+    input:focus, select:focus, textarea:focus { border-color: #F0A500 !important; outline: none; }
+    button:hover:not(:disabled) { opacity: .85; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input[type=checkbox] { accent-color: #F0A500; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #080B14; }
+    ::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // ─── INDICADORES ─────────────────────────────────────────────────────────
+    const ema = (d, p) => { const k = 2/(p+1); return d.reduce((a,v,i) => { a.push(i===0 ? v : v*k+a[i-1]*(1-k)); return a; }, []); };
+    const rsi = (c, p=14) => { if(c.length<p+1) return c.map(()=>50); const r=new Array(p).fill(50); let ag=0,al=0; for(let i=1;i<=p;i++){const d=c[i]-c[i-1];ag+=d>0?d:0;al+=d<0?-d:0;} ag/=p;al/=p; r.push(al===0?100:100-100/(1+ag/al)); for(let i=p+1;i<c.length;i++){const d=c[i]-c[i-1];ag=(ag*(p-1)+(d>0?d:0))/p;al=(al*(p-1)+(d<0?-d:0))/p;r.push(al===0?100:100-100/(1+ag/al));} return r; };
+    const atr = (cs, p=14) => { if(cs.length<2) return 0; const trs=cs.slice(1).map((c,i)=>Math.max(c.h-c.l,Math.abs(c.h-cs[i].c),Math.abs(c.l-cs[i].c))); let a=trs.slice(0,p).reduce((s,v)=>s+v,0)/Math.min(p,trs.length); trs.slice(p).forEach(t=>{a=(a*(p-1)+t)/p;}); return a; };
+
+    // ─── API CRYPTO.COM DIRECTA ───────────────────────────────────────────────
+    const fetchC = async (pair, tf, count=100) => {
+      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${pair}_USDT&timeframe=${tf}&count=${Math.min(count,300)}`);
+      const d = await r.json();
+      if (d.code !== 0) throw new Error(d.message || "API error");
+      return d.result.data.map(c => ({t:+c.t,o:+c.o,h:+c.h,l:+c.l,c:+c.c,v:+(c.v||0)})).sort((a,b)=>a.t-b.t);
+    };
+    const fetchPrice = async (pair) => {
+      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-ticker?instrument_name=${pair}_USDT`);
+      const d = await r.json();
+      return +d.result.data.a;
+    };
+
+    // ─── PARSER ───────────────────────────────────────────────────────────────
+    const parseMessages = (raw) => {
+      const signals = [];
+      const blocks = raw.split(/(?=(?:🟡|🔴|SHORT|LONG|●|Estrategia|👀|⚠️|📉))/g).filter(b => b.trim().length > 10);
+      for (const block of blocks) {
+        const b = block.trim();
+        if (b.includes("RSI VIGILANCIA") || (b.includes("FASE 1") && b.includes("RSI"))) {
+          const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
+          const rsiValue = parseFloat((b.match(/RSI[^\d]*([\d.]+)/)||[])[1]);
+          const dir = b.includes("sobrecompra") ? "SHORT" : "LONG";
+          if (pair) signals.push({ type:"FASE1", pair, dir, rsiValue, raw:b });
+          continue;
+        }
+        if (b.includes("RSI GIRANDO") || (b.includes("FASE 2") && b.includes("RSI"))) {
+          const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
+          const rsiVals = [...b.matchAll(/([\d.]+)/g)].map(m=>+m[1]).filter(v=>v>10&&v<100);
+          const dir = rsiVals[0] > 50 ? "SHORT" : "LONG";
+          if (pair) signals.push({ type:"FASE2", pair, dir, rsiFrom:rsiVals[0], rsiTo:rsiVals[1], raw:b });
+          continue;
+        }
+        if (b.includes("ALERTA RSI EXTREMO") || (b.includes("FASE 3") && b.includes("RSI"))) {
+          const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
+          const rsiMatch = b.match(/([\d.]+)\s*→\s*([\d.]+)/);
+          const rsiFrom = rsiMatch ? +rsiMatch[1] : null;
+          const rsiTo = rsiMatch ? +rsiMatch[2] : null;
+          const peakMatch = b.match(/pico\s*([\d.]+)/);
+          const rsiPeak = peakMatch ? +peakMatch[1] : rsiFrom;
+          const dir = (rsiTo !== null && rsiTo < 50) ? "LONG" : "SHORT";
+          const profundo = b.includes("PROFUNDO");
+          if (pair) signals.push({ type:"FASE3", pair, dir, rsiFrom, rsiTo, rsiPeak, profundo, raw:b });
+          continue;
+        }
+        if (b.includes("BMSB") || b.includes("Bullmarket")) {
+          const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
+          const dir = b.includes("LONG") ? "LONG" : "SHORT";
+          const banda = parseFloat((b.match(/Banda\s+(?:sup|inf)\s*[.:]\s*([\d.]+)/i)||[])[1]);
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1];
+          if (pair) signals.push({ type:"BMSB", pair, dir, banda, timeStr, raw:b });
+        } else if (b.includes("MEDIA") || b.includes("PRIORITARIA") || b.includes("Cumplidas")) {
+          const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
+          const priority = b.includes("PRIORITARIA") ? "PRIORITARIA" : "MEDIA";
+          const dir = b.includes("SHORT") || (b.includes("bajo EMA200") && !b.includes("BTC: Alcista")) ? "SHORT" : "LONG";
+          const cumplidas = parseInt((b.match(/Cumplidas\s*\((\d+)\/4\)/)||[])[1]) || 0;
+          const conditions = []; let inC = false;
+          b.split("\n").forEach(l => { if(l.includes("Cumplidas")) inC=true; if(l.includes("Pendientes")) inC=false; if(inC&&l.includes("•")) conditions.push(l.trim()); });
+          const btcBias = b.includes("BTC: Bajista") || b.includes("bajo EMA200") ? "BAJISTA" : "ALCISTA";
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1];
+          if (pair) signals.push({ type:"ALERTA", pair, dir, priority, cumplidas, conditions, btcBias, timeStr, raw:b });
+        } else if (b.includes("SMT Pro") || b.includes("BOS/CHoCH") || b.includes("CHoCH") || b.includes("Señal")) {
+          const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
+          const dir = b.includes("LONG") ? "LONG" : "SHORT";
+          const entry = parseFloat((b.match(/Entrada\s*:\s*([\d.]+)/)||[])[1]);
+          const tp1 = parseFloat((b.match(/TP1\s*:\s*([\d.]+)/)||[])[1]);
+          const tp2 = parseFloat((b.match(/TP2\s*:\s*([\d.]+)/)||[])[1]);
+          const tp3 = parseFloat((b.match(/TP3\s*:\s*([\d.]+)/)||[])[1]);
+          const sl = parseFloat((b.match(/SL\s*:\s*([\d.]+)/)||[])[1]);
+          const signal = (b.match(/Señal\s*:\s*(\w+)/)||[])[1] || "BOS";
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1];
+          if (pair && !isNaN(entry)) signals.push({ type:"SMT", pair, dir, entry, tp1, tp2, tp3, sl, signal, timeStr, raw:b });
+        }
+      }
+      return signals;
+    };
+
+    // ─── HELPERS ──────────────────────────────────────────────────────────────
+    const buildOrder = (dir, entryP, slP, tp1P, tp2P, tp3P, riskPct, capital) => {
+      const slDist = Math.abs(entryP - slP) / entryP;
+      const riskUSDT = capital * riskPct;
+      const leverage = Math.min(10, Math.max(1, +(riskPct/slDist).toFixed(1)));
+      const size = riskUSDT / slDist;
+      const atrInflado = slDist > 0.03;
+      return { entry:entryP, sl:slP, tp1:tp1P, tp2:tp2P, tp3:tp3P, leverage, size:+size.toFixed(2), riskUSDT:+riskUSDT.toFixed(2), riskPct, atrInflado };
+    };
+
+    const filtroContexto = (sig, result) => {
+      if (!result.order || result.verdict === "VETADO") return null;
+      const { entry, sl, tp1 } = result.order;
+      const current = result.data.currentPrice;
+      const totalDist = Math.abs(tp1 - entry);
+      const recorrido = totalDist > 0 ? Math.abs(current - entry) / totalDist * 100 : 0;
+      const q1Pass = recorrido < 50;
+      const rrCurrent = totalDist > 0 && Math.abs(current - sl) > 0 ? Math.abs(tp1 - current) / Math.abs(current - sl) : 1;
+      const q4Pass = rrCurrent >= 1;
+      return {
+        q1: { auto:true, pass:q1Pass, label:"¿Tren sin pasar?", detail:`Recorrido a TP1: ${recorrido.toFixed(0)}% ${q1Pass?"✓":"→ El tren ya pasó"}` },
+        q2: { auto:false, label:"¿Vela de entrada clara ahora?", detail:"Confirmar en chart" },
+        q3: { auto:false, label:"¿Estructura confirma la señal?", detail:"Verificar en 4H/1D" },
+        q4: { auto:true, pass:q4Pass, label:"¿R:R actual ≥ 1:1?", detail:`R:R: ${rrCurrent.toFixed(2)} ${q4Pass?"✓":"→ R:R insuficiente"}` },
+      };
+    };
+
+    // ─── ANÁLISIS SMT/BMSB ────────────────────────────────────────────────────
+    const analyzeSenal = async (sig, capital, openPos, mode) => {
+      const [btcD, pairD, pair4H] = await Promise.all([
+        fetchC("BTC","1D",250),
+        fetchC(sig.pair==="BTC"?"ETH":sig.pair,"1D",100),
+        fetchC(sig.pair==="BTC"?"ETH":sig.pair,"4H",100)
+      ]);
+      const btcC = btcD.map(c=>c.c);
+      const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
+      const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
+      const p4C = pair4H.map(c=>c.c);
+      const p4RSI=rsi(p4C), rsiNow=p4RSI.at(-1), rsiPrev=p4RSI.at(-6), rsiDir=rsiNow>rsiPrev?"↑":"↓";
+      const atr4H=atr(pair4H), currentPrice=p4C.at(-1);
+      const ema200_4H=ema(p4C,200).at(-1), ema50_4H=ema(p4C,50).at(-1), ema20_4H=ema(p4C,20).at(-1);
+      const isRanging=Math.abs(ema20_4H-ema50_4H)/currentPrice*100<0.5;
+      let ageHours=0;
+      if(sig.timeStr){const[dp,tp]=sig.timeStr.split(" ");const[d,m,y]=dp.split("/");ageHours=(Date.now()-new Date(`${y}-${m}-${d}T${tp}:00Z`).getTime())/3600000;}
+      const entryRef=sig.entry||currentPrice, atrMult=atr4H>0?Math.abs(currentPrice-entryRef)/atr4H:0;
+      const inExtreme=sig.dir==="LONG"?rsiNow<35:rsiNow>65;
+      const rsiExitPts=sig.dir==="LONG"?Math.max(0,rsiNow-35):Math.max(0,65-rsiNow);
+      const rsiFav=sig.dir==="LONG"?rsiNow<rsiPrev:rsiNow>rsiPrev;
+      let score=0; const vetoes=[], items=[];
+      if(openPos>=3){vetoes.push("3 posiciones abiertas → VETO overtrading");return{verdict:"VETADO",vetoes,items,score:0,minScore:7,data:{btcPrice,btcEMA200,btcAbove,btcInCorr,currentPrice,rsiNow,rsiDir,atr4H,isRanging}};}
+      if(sig.dir==="LONG"){
+        if(!btcAbove){vetoes.push(`BTC ${btcPrice.toFixed(0)} bajo MM200 → VETO LONGs`);}
+        else if(btcInCorr){score+=2;items.push({k:"BTC a favor 1D",p:2,m:3,s:"PARCIAL",n:"Alcista pero EMA20<EMA50 → mín 8/10"});}
+        else{score+=3;items.push({k:"BTC a favor 1D",p:3,m:3,s:"OK",n:`${btcPrice.toFixed(0)} sobre MM200 ✓`});}
+      } else {
+        if(!btcAbove){score+=3;items.push({k:"BTC a favor 1D",p:3,m:3,s:"OK",n:`Bajista ${btcPrice.toFixed(0)}<MM200 ✓`});}
+        else{score+=1;items.push({k:"BTC a favor 1D",p:1,m:3,s:"PARCIAL",n:"BTC alcista — SHORT contrarian +1"});}
+      }
+      if(isRanging) vetoes.push(`EMAs entrelazadas 4H → Rango`);
+      const bosAuto=sig.type==="SMT"?3:2; score+=bosAuto;
+      items.push({k:"Estructura (bot)",p:bosAuto,m:3,s:"OK",n:sig.type==="SMT"?`${sig.signal} detectado ✓`:"Cruce BMSB ✓"});
+      if(sig.type==="SMT"){score+=2;items.push({k:"Rechazo en EMA",p:2,m:2,s:"OK",n:"SMT en zona EMA ✓"});}
+      else{score+=1;items.push({k:"Rechazo en EMA",p:1,m:2,s:"PARCIAL",n:"BMSB banda de valor +1"});}
+      if(inExtreme){score+=2;items.push({k:"RSI 4H",p:2,m:2,s:"OK",n:`${rsiNow.toFixed(1)} ${rsiDir} zona extrema ✓`});}
+      else if(rsiExitPts<10){score+=1;items.push({k:"RSI 4H",p:1,m:2,s:"PENALIZADO",n:`${rsiNow.toFixed(1)} ${rsiDir} salió ${rsiExitPts.toFixed(0)}pts`});}
+      else{if(!rsiFav){vetoes.push(`RSI 4H ${rsiNow.toFixed(1)} gira en contra`);items.push({k:"RSI 4H",p:0,m:2,s:"VETO",n:`${rsiNow.toFixed(1)} momentum cambiado`});}
+      else{score+=1;items.push({k:"RSI 4H",p:1,m:2,s:"PENALIZADO",n:`${rsiNow.toFixed(1)} salió pero favorable`});}}
+      if(sig.entry){
+        if(atrMult>=3){vetoes.push(`Agotamiento: ${atrMult.toFixed(1)}x ATR`);items.push({k:"Agotamiento ATR",p:-3,m:0,s:"VETO",n:`${atrMult.toFixed(1)}x ATR ≥3x`});}
+        else if(atrMult>=2){score-=2;items.push({k:"Agotamiento ATR",p:-2,m:0,s:"PENALIZADO",n:`${atrMult.toFixed(1)}x ATR`});}
+        else items.push({k:"Agotamiento ATR",p:0,m:0,s:"OK",n:`${atrMult.toFixed(1)}x ATR ✓`});
+      }
+      if(ageHours>4&&atrMult>1) vetoes.push(`Señal ${ageHours.toFixed(1)}h antigua — esperar retest`);
+      const distMacro=Math.abs(currentPrice-ema200_4H)/currentPrice*100;
+      if(distMacro>8){score+=1;items.push({k:"Espacio macro",p:1,m:1,s:"OK",n:`${distMacro.toFixed(1)}% hasta EMA200 ✓`});}
+      else items.push({k:"Espacio macro",p:0,m:1,s:"NO",n:`Solo ${distMacro.toFixed(1)}% margen`});
+      const minScore=btcInCorr?8:7;
+      const verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":score+4>=minScore?"POSIBLE":"VETADO";
+      const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
+      let order=null;
+      if(verdict!=="VETADO"){
+        const entryP=sig.entry||currentPrice;
+        const slP=sig.sl||(sig.dir==="LONG"?entryP-atr4H*1.5:entryP+atr4H*1.5);
+        const tp1P=sig.tp1||(sig.dir==="LONG"?entryP+atr4H*1.5:entryP-atr4H*1.5);
+        const tp2P=sig.tp2||(sig.dir==="LONG"?entryP+atr4H*2.25:entryP-atr4H*2.25);
+        const tp3P=sig.tp3||(sig.dir==="LONG"?entryP+atr4H*3:entryP-atr4H*3);
+        order=buildOrder(sig.dir,entryP,slP,tp1P,tp2P,tp3P,riskPct,capital);
+      }
+      return{verdict,vetoes,items,score,minScore,data:{btcPrice,btcEMA200,btcAbove,btcInCorr,currentPrice,rsiNow,rsiDir,atr4H,isRanging},order};
+    };
+
+    // ─── ANÁLISIS ALERTA ──────────────────────────────────────────────────────
+    const analyzeAlerta = async (sig, capital, openPos, mode) => {
+      const [btcD, pair4H, pair1H] = await Promise.all([
+        fetchC("BTC","1D",250),
+        fetchC(sig.pair,"4H",100),
+        fetchC(sig.pair,"1H",100)
+      ]);
+      const btcC = btcD.map(c=>c.c);
+      const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
+      const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
+      const btcBiasLive=btcAbove?(btcInCorr?"CORRECCIÓN":"ALCISTA"):"BAJISTA";
+      const p4C=pair4H.map(c=>c.c), p1C=pair1H.map(c=>c.c), currentPrice=p4C.at(-1);
+      const rsi4H=rsi(p4C).at(-1), rsi1H=rsi(p1C).at(-1), rsiDir4H=rsi4H>rsi(p4C).at(-2)?"↑":"↓";
+      const atr4H_v=atr(pair4H), ema20_4H=ema(p4C,20).at(-1), ema50_4H=ema(p4C,50).at(-1);
+      const isRanging=Math.abs(ema20_4H-ema50_4H)/currentPrice*100<0.5;
+      if(openPos>=3) return{verdict:"VETADO",vetoes:["3 posiciones abiertas"],items:[],score:0,minScore:7,data:{currentPrice,rsi4H,rsi1H,atr4H_v,isRanging,btcBiasLive}};
+      let score=0; const vetoes=[], items=[];
+      const btcFavor=(sig.dir==="LONG"&&btcAbove&&!btcInCorr)||(sig.dir==="SHORT"&&(!btcAbove||btcInCorr));
+      const btcNeutral=sig.dir==="LONG"&&btcAbove&&btcInCorr;
+      if(sig.dir==="LONG"&&!btcAbove){vetoes.push("BTC bajista → VETO LONG");items.push({k:"BTC macro (live)",p:0,m:4,s:"VETO",n:`BTC ${btcPrice.toFixed(0)} bajo MM200`});}
+      else if(btcFavor){score+=4;items.push({k:"BTC macro (live)",p:4,m:4,s:"OK",n:`BTC ${btcBiasLive} ✓`});}
+      else if(btcNeutral){score+=2;items.push({k:"BTC macro (live)",p:2,m:4,s:"PARCIAL",n:"BTC en CORRECCIÓN — LONG con cautela +2"});}
+      else{score+=1;items.push({k:"BTC macro (live)",p:1,m:4,s:"PARCIAL",n:`BTC ${btcBiasLive} — contrarian +1`});}
+      const botBias=sig.btcBias;
+      if(botBias&&((botBias==="ALCISTA")!==btcAbove)){
+        items.push({k:"⚠️ Sesgo desactualizado",p:0,m:0,s:"PENALIZADO",n:`Bot: ${botBias} | Live: ${btcBiasLive}`});
+      }
+      const pts=sig.cumplidas>=3?3:sig.cumplidas===2?2:1; score+=pts;
+      items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:pts,m:3,s:sig.cumplidas>=2?"OK":"PARCIAL",n:sig.conditions.slice(0,2).join(", ")||"Ver mensaje"});
+      if(sig.priority==="PRIORITARIA"){score+=1;items.push({k:"Alerta PRIORITARIA",p:1,m:1,s:"OK",n:"3-4 condiciones +1"});}
+      const inExtreme1H=sig.dir==="LONG"?rsi1H<40:rsi1H>60;
+      if(inExtreme1H){score+=2;items.push({k:"RSI 1H",p:2,m:2,s:"OK",n:`${rsi1H.toFixed(1)} ${rsiDir4H} zona favorable ✓`});}
+      else{score+=1;items.push({k:"RSI 1H",p:1,m:2,s:"PARCIAL",n:`${rsi1H.toFixed(1)} neutral +1`});}
+      if(isRanging) vetoes.push("EMAs entrelazadas 4H → Rango activo");
+      const minScore=7, verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":"POSIBLE";
+      const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
+      const slP=sig.dir==="LONG"?currentPrice-atr4H_v*1.5:currentPrice+atr4H_v*1.5;
+      const tp1P=sig.dir==="LONG"?currentPrice+atr4H_v*1.5:currentPrice-atr4H_v*1.5;
+      const tp2P=sig.dir==="LONG"?currentPrice+atr4H_v*2.25:currentPrice-atr4H_v*2.25;
+      const tp3P=sig.dir==="LONG"?currentPrice+atr4H_v*3:currentPrice-atr4H_v*3;
+      const order=buildOrder(sig.dir,currentPrice,slP,tp1P,tp2P,tp3P,riskPct,capital);
+      return{verdict,vetoes,items,score,minScore,data:{btcPrice,btcAbove,btcInCorr,btcBiasLive,currentPrice,rsi4H,rsi1H,rsiDir4H,atr4H_v,isRanging},order};
+    };
+
+    // ─── ANÁLISIS FASE 3 ──────────────────────────────────────────────────────
+    const analyzeFase3 = async (sig, capital, openPos, mode) => {
+      const [btcD, pair4H] = await Promise.all([fetchC("BTC","1D",250), fetchC(sig.pair,"4H",100)]);
+      const btcC=btcD.map(c=>c.c);
+      const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
+      const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
+      const p4C=pair4H.map(c=>c.c), currentPrice=p4C.at(-1);
+      const ema50_4H=ema(p4C,50).at(-1), ema20_4H=ema(p4C,20).at(-1);
+      const atr4H_v=atr(pair4H);
+      const last3Vol=pair4H.slice(-3).map(c=>c.v||0);
+      const volDecreasing=last3Vol.length===3&&last3Vol[0]>last3Vol[1]&&last3Vol[1]>last3Vol[2];
+      const rsiPeak=sig.rsiPeak||sig.rsiFrom||72;
+      const isProfundo=sig.dir==="LONG"?rsiPeak<25:rsiPeak>75;
+      if(openPos>=3) return{verdict:"VETADO",vetoes:["3 posiciones abiertas"],items:[],score:0,minScore:7,data:{currentPrice,atr4H_v}};
+      let score=0; const vetoes=[], items=[];
+      if(sig.dir==="LONG"){
+        if(!btcAbove){vetoes.push("BTC bajista → VETO LONG RSI Extremo");items.push({k:"Sesgo BTC",p:0,m:3,s:"VETO",n:`BTC ${btcPrice.toFixed(0)} bajo MM200`});}
+        else if(btcInCorr){score+=2;items.push({k:"Sesgo BTC",p:2,m:3,s:"PARCIAL",n:"Alcista en corrección +2"});}
+        else{score+=3;items.push({k:"Sesgo BTC",p:3,m:3,s:"OK",n:`BTC alcista ✓`});}
+      } else {
+        if(!btcAbove||btcInCorr){score+=3;items.push({k:"Sesgo BTC",p:3,m:3,s:"OK",n:`BTC ${btcInCorr?"corrección":"bajista"} → SHORT ✓`});}
+        else{score+=1;items.push({k:"Sesgo BTC",p:1,m:3,s:"PARCIAL",n:"BTC alcista — SHORT contrarian +1"});}
+      }
+      const d20=Math.abs(currentPrice-ema20_4H)/currentPrice*100;
+      const d50=Math.abs(currentPrice-ema50_4H)/currentPrice*100;
+      const minD=Math.min(d20,d50);
+      if(minD<0.5){score+=2;items.push({k:"Posición vs EMAs",p:2,m:2,s:"OK",n:`Rechazándose en EMA (${minD.toFixed(2)}%) ✓`});}
+      else if(minD<2){score+=1;items.push({k:"Posición vs EMAs",p:1,m:2,s:"PARCIAL",n:`Cerca de EMA (${minD.toFixed(2)}%) +1`});}
+      else items.push({k:"Posición vs EMAs",p:0,m:2,s:"NO",n:`Sin ref. EMA (${minD.toFixed(2)}%)`});
+      if(isProfundo){score+=2;items.push({k:"Profundidad RSI",p:2,m:2,s:"OK",n:`Pico ${rsiPeak.toFixed(1)} — PROFUNDO ✓`});}
+      else{score+=1;items.push({k:"Profundidad RSI",p:1,m:2,s:"PARCIAL",n:`Pico ${rsiPeak.toFixed(1)} — zona extrema +1`});}
+      items.push({k:"CHoCH 4H (manual)",p:null,m:2,s:"PENDIENTE",n:"Verificar CHoCH en chart"});
+      if(volDecreasing){score+=1;items.push({k:"Volumen",p:1,m:1,s:"OK",n:"Vol decreciente ✓"});}
+      else items.push({k:"Volumen",p:0,m:1,s:"NO",n:"Sin confirmación de volumen"});
+      const minScore=7;
+      const verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":score+2>=minScore?"POSIBLE":"VETADO";
+      const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
+      const slP=sig.dir==="LONG"?currentPrice-atr4H_v*1.5:currentPrice+atr4H_v*1.5;
+      const tp1P=sig.dir==="LONG"?currentPrice+atr4H_v*1.5:currentPrice-atr4H_v*1.5;
+      const tp2P=sig.dir==="LONG"?currentPrice+atr4H_v*2.25:currentPrice-atr4H_v*2.25;
+      const tp3P=sig.dir==="LONG"?currentPrice+atr4H_v*3:currentPrice-atr4H_v*3;
+      const order=buildOrder(sig.dir,currentPrice,slP,tp1P,tp2P,tp3P,riskPct,capital);
+      return{verdict,vetoes,items,score,minScore,data:{btcPrice,btcAbove,btcInCorr,currentPrice,atr4H_v},order};
+    };
+
+    // ─── SCANNER ──────────────────────────────────────────────────────────────
+    const PAIRS_16=["BTC","ETH","SOL","XRP","ADA","TAO","STX","SUI","NEAR","DOT","INJ","AAVE","AVAX","HBAR","POL","RUNE"];
+    const scanPair = async (pair) => {
+      try {
+        const [d1,h4]=await Promise.all([fetchC(pair,"1D",50),fetchC(pair,"4H",50)]);
+        const c1=d1.map(c=>c.c), c4=h4.map(c=>c.c), p=c1.at(-1);
+        const e200=ema(c1,200).at(-1), e50=ema(c1,50).at(-1), e20=ema(c1,20).at(-1);
+        const r1D=rsi(c1).at(-1), r4H=rsi(c4).at(-1), a4H=atr(h4);
+        const aboveEMA200=p>e200; let score=0;
+        if(aboveEMA200) score+=20; if(r4H<35||r4H>65) score+=30;
+        const distEMA=Math.min(Math.abs(p-e20),Math.abs(p-e50))/p*100;
+        if(distEMA<1) score+=30; const ranging=Math.abs(e20-e50)/p*100<0.5; if(!ranging) score+=20;
+        return{pair,price:p,ema200:e200,rsi1D:r1D.toFixed(1),rsi4H:r4H.toFixed(1),atr:a4H,dir:aboveEMA200?"LONG":"SHORT",score,ranging,distEMA:distEMA.toFixed(2)};
+      } catch { return null; }
+    };
+
+    // ─── UI ───────────────────────────────────────────────────────────────────
+    const uid=()=>Math.random().toString(36).slice(2,9);
+    const f=(n,dec)=>{if(n==null||isNaN(n))return"—";const d=dec!=null?dec:n<0.01?6:n<1?4:n<100?4:2;return n.toFixed(d);};
+    const C={bg:"#080B14",card:"#0F1827",border:"#1E293B",gold:"#F0A500",green:"#2ECC71",red:"#E74C3C",blue:"#3498DB",orange:"#E67E22",gray:"#6B7280",text:"#E8EAF0",purple:"#9B59B6"};
+    const VC={APROBADA:C.green,POSIBLE:C.orange,VETADO:C.red};
+    const VI={APROBADA:"✅",POSIBLE:"⚠️",VETADO:"🚫"};
+
+    const Card=({children,style={}})=><div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12,...style}}>{children}</div>;
+    const Title=({children})=><div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:12}}>{children}</div>;
+    const Row=({k,v,vc})=><div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:"1px solid #1A2235"}}><span style={{color:C.gray,fontSize:11}}>{k}</span><span style={{color:vc||C.text,fontWeight:600,fontSize:12}}>{v}</span></div>;
+    const Pill=({c,children})=><span style={{background:c+"22",color:c,borderRadius:4,padding:"2px 7px",fontSize:11,fontWeight:700,marginLeft:4}}>{children}</span>;
+    const Btn=({onClick,children,color=C.gold,disabled=false,style={}})=><button onClick={onClick} disabled={disabled} style={{background:disabled?"#333":color,border:"none",borderRadius:6,padding:"10px 14px",color:color===C.gold?"#080B14":"#fff",fontFamily:"'Courier New',monospace",fontSize:12,fontWeight:700,cursor:disabled?"not-allowed":"pointer",letterSpacing:1,...style}}>{children}</button>;
+    const ScoreItem=({item})=>{
+      const col={OK:C.green,VETO:C.red,PENALIZADO:C.orange,PARCIAL:C.gold,PENDIENTE:C.gray,NO:C.red};
+      return<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"6px 0",borderBottom:`1px solid ${C.border}`}}>
+        <div><div style={{color:col[item.s]||C.gray,fontWeight:600,fontSize:12}}>{item.k}</div><div style={{color:C.gray,fontSize:11,marginTop:2}}>{item.n}</div></div>
+        <div style={{color:col[item.s]||C.gray,fontWeight:700,fontSize:14,minWidth:30,textAlign:"right"}}>{item.p===null?"⏳":item.p>0?`+${item.p}`:item.p<0?item.p:"✓"}{item.m>0&&item.p!==null&&<span style={{opacity:.4,fontSize:10}}>/{item.m}</span>}</div>
+      </div>;
+    };
+
+    const FiltroContexto=({sig,result,onConfirmed})=>{
+      const fc=filtroContexto(sig,result);
+      if(!fc) return null;
+      const [q2,setQ2]=useState(false);
+      const [q3,setQ3]=useState(false);
+      const autoFail=!fc.q1.pass||!fc.q4.pass;
+      const allOk=fc.q1.pass&&q2&&q3&&fc.q4.pass;
+      const Qrow=({q,checked,onCheck,auto})=>(
+        <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{marginTop:2,flexShrink:0}}>
+            {auto?<span style={{fontSize:14}}>{q.pass?"✅":"🚫"}</span>:<input type="checkbox" checked={checked} onChange={e=>onCheck(e.target.checked)} style={{width:16,height:16,cursor:"pointer"}}/>}
+          </div>
+          <div>
+            <div style={{color:auto?(q.pass?C.green:C.red):checked?C.green:C.gray,fontWeight:600,fontSize:12}}>{q.label}</div>
+            <div style={{color:C.gray,fontSize:11}}>{q.detail}</div>
+          </div>
+        </div>
+      );
+      return(
+        <div style={{marginTop:10,background:"#0A0F1A",borderRadius:8,padding:10}}>
+          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>🔍 PASO 2.5 — FILTRO DE CONTEXTO</div>
+          <Qrow q={fc.q1} auto={true}/>
+          <Qrow q={fc.q2} auto={false} checked={q2} onCheck={setQ2}/>
+          <Qrow q={fc.q3} auto={false} checked={q3} onCheck={setQ3}/>
+          <Qrow q={fc.q4} auto={true}/>
+          {autoFail
+            ?<div style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:8,marginTop:10,color:C.red,fontSize:12,fontWeight:700}}>
+              🚫 VETO DE CONTEXTO — {!fc.q1.pass?"El tren ya pasó":"R:R insuficiente"}
+            </div>
+            :<Btn onClick={onConfirmed} disabled={!allOk} color={allOk?"#27AE60":C.gray} style={{width:"100%",marginTop:10}}>
+              {allOk?"⚡ Contexto OK — Abrir posición":"☑️ Confirma las casillas para continuar"}
+            </Btn>}
+        </div>
+      );
+    };
+
+    const SignalResult=({result,sig,onAddPos})=>{
+      const vc=VC[result.verdict]||C.gray;
+      const [showOrder,setShowOrder]=useState(false);
+      return(
+        <div style={{background:C.card,border:`2px solid ${vc}`,borderRadius:10,padding:14,marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div>
+              <span style={{fontWeight:700,color:C.gold,fontSize:14}}>{sig.pair}</span>
+              <Pill c={sig.dir==="LONG"?C.green:C.red}>{sig.dir}</Pill>
+              <Pill c={C.blue}>{sig.type}</Pill>
+              {sig.priority&&<Pill c={sig.priority==="PRIORITARIA"?C.red:C.orange}>{sig.priority}</Pill>}
+              {sig.profundo&&<Pill c={C.purple}>PROFUNDO</Pill>}
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{color:vc,fontWeight:700,fontSize:16}}>{VI[result.verdict]} {result.verdict}</div>
+              <div style={{color:C.gray,fontSize:11}}>{result.score}/{result.minScore} pts</div>
+            </div>
+          </div>
+          {result.vetoes.length>0&&<div style={{background:"#1E0A0A",borderRadius:6,padding:8,marginBottom:8}}>{result.vetoes.map((v,i)=><div key={i} style={{color:C.red,fontSize:11}}>🚫 {v}</div>)}</div>}
+          <div style={{background:"#0A0F1A",borderRadius:6,padding:8,marginBottom:8}}>
+            {[["Precio",f(result.data.currentPrice)],["RSI 4H",`${(result.data.rsiNow||result.data.rsi4H||0).toFixed(1)} ${result.data.rsiDir||result.data.rsiDir4H||""}`],["ATR 4H",f(result.data.atr4H||result.data.atr4H_v)],["Ranging",result.data.isRanging?"⚠️ Sí":"✅ No"]].map(([k,v])=><Row key={k} k={k} v={v}/>)}
+            {result.data.btcBiasLive&&<Row k="BTC (live)" v={result.data.btcBiasLive} vc={result.data.btcAbove?(result.data.btcInCorr?C.orange:C.green):C.red}/>}
+          </div>
+          {result.items.map((item,i)=><ScoreItem key={i} item={item}/>)}
+          {(result.verdict==="APROBADA"||result.verdict==="POSIBLE")&&result.order&&<>
+            <Btn onClick={()=>setShowOrder(!showOrder)} color={result.verdict==="APROBADA"?C.green:C.orange} style={{width:"100%",marginTop:10}}>
+              {showOrder?"Ocultar orden":"📋 Ver orden de entrada"}
+            </Btn>
+            {showOrder&&<div style={{marginTop:10,background:"#0A0F1A",borderRadius:8,padding:10}}>
+              {result.order.atrInflado&&<div style={{background:"#1E1000",border:`1px solid ${C.orange}`,borderRadius:6,padding:8,marginBottom:10,color:C.orange,fontSize:11,fontWeight:700}}>
+                ⚠️ ATR posiblemente inflado — SL amplio, TPs exigentes. Valora esperar normalización.
+              </div>}
+              {[["Entrada",f(result.order.entry),C.gold],["Stop Loss",f(result.order.sl),C.red],["TP1 (50%)",f(result.order.tp1),C.green],["TP2 (25%)",f(result.order.tp2),C.green],["TP3 (25%)",f(result.order.tp3),C.green],["Apalancamiento",`${result.order.leverage}x`,result.order.leverage>=8?C.red:result.order.leverage>=5?C.orange:C.green],["Tamaño",`${result.order.size} USDT`],["Riesgo",`${(result.order.riskPct*100).toFixed(1)}% = ${result.order.riskUSDT.toFixed(2)} USDT`]].map(([k,v,vc])=><Row key={k} k={k} v={v} vc={vc}/>)}
+              {result.verdict==="APROBADA"
+                ?<FiltroContexto sig={sig} result={result} onConfirmed={()=>onAddPos(sig,result)}/>
+                :<div style={{color:C.orange,fontSize:11,marginTop:10,textAlign:"center"}}>Señal POSIBLE — eleva puntuación antes de entrar</div>}
+            </div>}
+          </>}
+        </div>
+      );
+    };
+
+    const FaseInfoCard=({sig})=>{
+      const isFase1=sig.type==="FASE1";
+      const color=isFase1?C.blue:C.orange;
+      const icon=isFase1?"👀":"⚠️";
+      const title=isFase1?"RSI VIGILANCIA — FASE 1":"RSI GIRANDO — FASE 2";
+      const desc=isFase1
+        ?`RSI entró en zona extrema: ${sig.rsiValue?.toFixed(1)||"—"} | Solo observar, sin acción`
+        :`RSI lleva 2 velas girando: ${sig.rsiFrom?.toFixed(1)||"—"} → ${sig.rsiTo?.toFixed(1)||"—"} | Prepararse para Fase 3`;
+      return(
+        <div style={{background:C.card,border:`2px solid ${color}`,borderRadius:10,padding:14,marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><span style={{fontWeight:700,color:C.gold,fontSize:14}}>{sig.pair}</span><Pill c={sig.dir==="LONG"?C.green:C.red}>{sig.dir}</Pill><Pill c={color}>{sig.type}</Pill></div>
+            <span style={{fontSize:20}}>{icon}</span>
+          </div>
+          <div style={{marginTop:10,padding:8,background:"#0A0F1A",borderRadius:6,color:color,fontSize:12}}>{icon} {title}</div>
+          <div style={{color:C.gray,fontSize:11,marginTop:8}}>{desc}</div>
+          {!isFase1&&<div style={{color:C.orange,fontSize:11,marginTop:6,fontWeight:700}}>→ Si el RSI cruza de vuelta el umbral → FASE 3 con análisis completo</div>}
+        </div>
+      );
+    };
+
+    // ─── APP ──────────────────────────────────────────────────────────────────
+    function App() {
+      const [tab,setTab]=useState("radar");
+      const [raw,setRaw]=useState("");
+      const [capital,setCapital]=useState("200");
+      const [openPos,setOpenPos]=useState("0");
+      const [mode,setMode]=useState("Normal");
+      const [parsed,setParsed]=useState([]);
+      const [results,setResults]=useState([]);
+      const [loading,setLoading]=useState(false);
+      const [loadingPairs,setLoadingPairs]=useState([]);
+      const [btcStatus,setBtcStatus]=useState(null);
+      const [positions,setPositions]=useState([]);
+      const [diary,setDiary]=useState([]);
+      const [scanner,setScanner]=useState([]);
+      const [scanning,setScanning]=useState(false);
+      const [priceTick,setPriceTick]=useState({});
+      const [parseError,setParseError]=useState("");
+
+      useEffect(()=>{
+        const p=localStorage.getItem("pos_v3"); if(p) setPositions(JSON.parse(p));
+        const d=localStorage.getItem("diary_v3"); if(d) setDiary(JSON.parse(d));
+        loadBTC();
+      },[]);
+
+      useEffect(()=>{
+        if(!positions.length) return;
+        const iv=setInterval(async()=>{const t={};for(const p of positions){try{t[p.pair]=await fetchPrice(p.pair);}catch{}}setPriceTick(t);},30000);
+        return()=>clearInterval(iv);
+      },[positions]);
+
+      const savePos=(p)=>{setPositions(p);localStorage.setItem("pos_v3",JSON.stringify(p));};
+      const saveDiary=(d)=>{setDiary(d);localStorage.setItem("diary_v3",JSON.stringify(d));};
+
+      const loadBTC=async()=>{
+        try{
+          const cs=await fetchC("BTC","1D",250);
+          const cl=cs.map(c=>c.c);
+          const e200=ema(cl,200).at(-1),e20=ema(cl,20).at(-1),e50=ema(cl,50).at(-1),p=cl.at(-1),r=rsi(cl).at(-1);
+          setBtcStatus({price:p,ema200:e200,above:p>e200,inCorr:p>e200&&e20<e50,rsi:r.toFixed(1)});
+        }catch(e){setBtcStatus({error:true,msg:e.message});}
+      };
+
+      const handleParse=()=>{
+        setParseError("");setResults([]);
+        const sigs=parseMessages(raw);
+        if(!sigs.length){setParseError("No se reconoció ningún mensaje. Comprueba que copiaste el texto completo.");return;}
+        setParsed(sigs);
+      };
+
+      const handleAnalyze=async()=>{
+        if(!parsed.length) return;
+        setLoading(true);setResults([]);
+        const cap=parseFloat(capital)||200,op=parseInt(openPos)||0,res=[];
+        for(const sig of parsed){
+          try{
+            let r;
+            if(sig.type==="FASE1"||sig.type==="FASE2"){r={verdict:"INFO",vetoes:[],items:[],score:0,minScore:0,data:{}};}
+            else if(sig.type==="FASE3"){r=await analyzeFase3(sig,cap,op,mode);}
+            else if(sig.type==="ALERTA"){r=await analyzeAlerta(sig,cap,op,mode);}
+            else{r=await analyzeSenal(sig,cap,op,mode);}
+            res.push({sig,result:r});
+          }catch(e){res.push({sig,result:{verdict:"VETADO",vetoes:[`Error: ${e.message}`],items:[],score:0,minScore:7,data:{}}});}
+        }
+        setResults(res);setLoading(false);
+      };
+
+      const handleScan=async()=>{
+        setScanning(true);setScanner([]);const res=[];
+        for(const pair of PAIRS_16){
+          setLoadingPairs(p=>[...p,pair]);
+          const r=await scanPair(pair);
+          if(r) res.push(r);
+          setLoadingPairs(p=>p.filter(x=>x!==pair));
+        }
+        setScanner(res.sort((a,b)=>b.score-a.score));setScanning(false);
+      };
+
+      const addPos=(sig,result)=>{
+        const o=result.order;
+        savePos([...positions,{id:uid(),pair:sig.pair,dir:sig.dir,type:sig.type,entry:o.entry,sl:o.sl,tp1:o.tp1,tp2:o.tp2,tp3:o.tp3,leverage:o.leverage,size:o.size,riskUSDT:o.riskUSDT,score:result.score,openedAt:new Date().toISOString(),mode}]);
+        setTab("positions");
+      };
+      const closePos=(pos,result)=>{saveDiary([{...pos,result,closedAt:new Date().toISOString()},...diary]);savePos(positions.filter(p=>p.id!==pos.id));};
+      const getPnL=(pos)=>{const cp=priceTick[pos.pair]||pos.entry,pct=pos.dir==="LONG"?(cp-pos.entry)/pos.entry*100:(pos.entry-cp)/pos.entry*100;return{pct};};
+
+      const stats=()=>{
+        if(!diary.length) return null;
+        const wins=diary.filter(d=>d.result!=="SL"),byT={SMT:{w:0,t:0},BMSB:{w:0,t:0},ALERTA:{w:0,t:0},FASE3:{w:0,t:0}},byP={};
+        diary.forEach(d=>{const t=d.type||"BMSB";if(byT[t]){byT[t].t++;if(d.result!=="SL")byT[t].w++;}if(!byP[d.pair])byP[d.pair]={w:0,t:0};byP[d.pair].t++;if(d.result!=="SL")byP[d.pair].w++;});
+        return{total:diary.length,winRate:(wins.length/diary.length*100).toFixed(0),byT,byP};
+      };
+
+      const tabs=[["radar","🎯 SEÑALES"],["scanner","📡 SCANNER"],["positions","📊 POSIC."],["stats","📈 STATS"]];
+
+      return(
+        <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Courier New',monospace",fontSize:13}}>
+          {/* HEADER */}
+          <div style={{background:"linear-gradient(90deg,#0D1321,#111827)",borderBottom:`1px solid ${C.border}`,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
+            <div style={{color:C.gold,fontWeight:700,fontSize:14,letterSpacing:2}}>⚡ TRADING CMD v3</div>
+            {btcStatus&&!btcStatus.error
+              ?<div style={{background:btcStatus.above?"#0D2818":"#1E0A0A",border:`1px solid ${btcStatus.above?C.green:C.red}`,borderRadius:6,padding:"3px 10px",fontSize:12,color:btcStatus.above?C.green:C.red,cursor:"pointer",display:"flex",gap:6}} onClick={loadBTC}>
+                <span>₿ {btcStatus.price.toFixed(0)}</span>
+                <span style={{opacity:.7}}>{btcStatus.above?(btcStatus.inCorr?"CORR":"BULL"):"BEAR"}</span>
+                <span>↻</span>
+              </div>
+              :<div style={{color:C.gold,fontSize:12,cursor:"pointer"}} onClick={loadBTC}>₿ {btcStatus?.msg||"Cargar BTC"}</div>}
+          </div>
+
+          {/* TABS */}
+          <div style={{display:"flex",background:"#0D1321",borderBottom:`1px solid ${C.border}`}}>
+            {tabs.map(([id,label])=><div key={id} style={{flex:1,padding:"11px 0",textAlign:"center",cursor:"pointer",fontSize:11,fontWeight:tab===id?700:400,color:tab===id?C.gold:C.gray,borderBottom:tab===id?`2px solid ${C.gold}`:"2px solid transparent"}} onClick={()=>setTab(id)}>{label}</div>)}
+          </div>
+
+          <div style={{padding:14,maxWidth:500,margin:"0 auto"}}>
+
+            {/* ── SEÑALES ── */}
+            {tab==="radar"&&<>
+              {btcStatus&&!btcStatus.error&&<Card>
+                <Title>₿ BITCOIN (1D)</Title>
+                <Row k="Precio" v={btcStatus.price.toFixed(0)}/><Row k="MM200" v={btcStatus.ema200.toFixed(0)}/><Row k="RSI" v={btcStatus.rsi}/>
+                <div style={{marginTop:10,padding:"8px",background:btcStatus.above?(btcStatus.inCorr?"#1A1200":"#0D2818"):"#1E0A0A",borderRadius:6,color:btcStatus.above?(btcStatus.inCorr?C.orange:C.green):C.red,fontSize:12,fontWeight:700,textAlign:"center"}}>
+                  {btcStatus.above?(btcStatus.inCorr?"⚠️ ALCISTA EN CORRECCIÓN — Mín 8/10":"✅ ALCISTA — LONGs con 7/10"):"🚫 BAJISTA — Solo SHORTs"}
+                </div>
+              </Card>}
+              <Card>
+                <Title>📋 PEGAR MENSAJES DEL BOT</Title>
+                <textarea value={raw} onChange={e=>{setRaw(e.target.value);setParsed([]);setResults([]);setParseError("");}}
+                  placeholder={"Pega mensajes de Telegram: SMT, BMSB, alertas, RSI Extremo Fase 1/2/3.\n\nPuedes pegar múltiples mensajes seguidos."}
+                  style={{width:"100%",minHeight:160,background:"#0A0F1A",border:`1px solid ${parseError?C.red:C.border}`,borderRadius:8,padding:12,color:C.text,fontFamily:"'Courier New',monospace",fontSize:12,resize:"vertical",outline:"none",boxSizing:"border-box",lineHeight:1.6}}/>
+                {parseError&&<div style={{color:C.red,fontSize:11,marginTop:6}}>⚠️ {parseError}</div>}
+                <Btn onClick={handleParse} style={{width:"100%",marginTop:10}}>🔍 DETECTAR MENSAJES</Btn>
+              </Card>
+              {parsed.length>0&&<>
+                <Card style={{borderColor:C.gold}}>
+                  <Title>✅ {parsed.length} MENSAJE{parsed.length>1?"S":""} DETECTADO{parsed.length>1?"S":""}</Title>
+                  {parsed.map((s,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:`1px solid ${C.border}`}}>
+                    <div>
+                      <span style={{color:C.gold,fontWeight:700}}>{s.pair}</span>
+                      <Pill c={s.dir==="LONG"?C.green:C.red}>{s.dir}</Pill>
+                      <Pill c={s.type==="FASE1"?C.blue:s.type==="FASE2"?C.orange:s.type==="FASE3"?C.purple:C.blue}>{s.type}</Pill>
+                      {s.priority&&<Pill c={s.priority==="PRIORITARIA"?C.red:C.orange}>{s.priority}</Pill>}
+                    </div>
+                    <span style={{color:C.gray,fontSize:11}}>{s.timeStr||"—"}</span>
+                  </div>)}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:12}}>
+                    <div><div style={{color:C.gray,fontSize:11,marginBottom:4}}>CAPITAL (USDT)</div><input value={capital} onChange={e=>setCapital(e.target.value)} style={{width:"100%",background:"#0A0F1A",border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontFamily:"'Courier New',monospace",fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
+                    <div><div style={{color:C.gray,fontSize:11,marginBottom:4}}>POSICIONES ABIERTAS</div>
+                      <select value={openPos} onChange={e=>setOpenPos(e.target.value)} style={{width:"100%",background:"#0A0F1A",border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontFamily:"'Courier New',monospace",fontSize:13,outline:"none",appearance:"none",boxSizing:"border-box"}}>
+                        <option>0</option><option>1</option><option>2</option><option value="3">3 (MAX)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:8,marginTop:10}}>
+                    {["Normal","Enfriamiento"].map(m=><div key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"7px 0",textAlign:"center",borderRadius:6,cursor:"pointer",background:mode===m?(m==="Normal"?"#0D2818":"#1E0A0A"):"#0A0F1A",border:`1px solid ${mode===m?(m==="Normal"?C.green:C.red):C.border}`,color:mode===m?(m==="Normal"?C.green:C.red):C.gray,fontSize:12,fontWeight:700}}>{m==="Normal"?"✅ Normal (2%)":"🔴 Enfriamiento (0.5%)"}</div>)}
+                  </div>
+                  {openPos==="3"&&<div style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:8,marginTop:10,color:C.red,fontSize:12,fontWeight:700}}>🚫 VETO: 3 posiciones = overtrading</div>}
+                  <Btn onClick={handleAnalyze} disabled={loading} color={loading?C.gray:C.gold} style={{width:"100%",marginTop:12}}>
+                    {loading?"⏳ ANALIZANDO...":"⚡ ANALIZAR TODO"}
+                  </Btn>
+                </Card>
+                {results.map(({sig,result},i)=>
+                  (sig.type==="FASE1"||sig.type==="FASE2")
+                    ?<FaseInfoCard key={i} sig={sig}/>
+                    :<SignalResult key={i} sig={sig} result={result} onAddPos={addPos}/>
+                )}
+              </>}
+            </>}
+
+            {/* ── SCANNER ── */}
+            {tab==="scanner"&&<>
+              <Card>
+                <Title>📡 ESCÁNER — 16 PARES</Title>
+                <div style={{color:C.gray,fontSize:11,marginBottom:12}}>Analiza los 16 pares en tiempo real directamente desde Crypto.com.</div>
+                {loadingPairs.length>0&&<div style={{color:C.orange,fontSize:11,marginBottom:8}}>Analizando: {loadingPairs.join(", ")}...</div>}
+                <Btn onClick={handleScan} disabled={scanning} color={scanning?C.gray:C.gold} style={{width:"100%"}}>{scanning?"⏳ ESCANEANDO...":"🔍 ESCANEAR AHORA"}</Btn>
+              </Card>
+              {scanner.map(s=><Card key={s.pair} style={{borderLeft:`3px solid ${s.score>=70?C.gold:s.score>=50?C.orange:C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div><span style={{fontWeight:700,color:C.gold,fontSize:14}}>{s.pair}</span><Pill c={s.dir==="LONG"?C.green:C.red}>{s.dir}</Pill>{s.ranging&&<Pill c={C.orange}>RANGO</Pill>}</div>
+                  <div style={{textAlign:"right"}}><div style={{color:s.score>=70?C.gold:s.score>=50?C.orange:C.gray,fontWeight:700,fontSize:18}}>{s.score}%</div><div style={{color:C.gray,fontSize:10}}>score técnico</div></div>
+                </div>
+                <div style={{background:"#0A0F1A",borderRadius:6,padding:8}}>{[["Precio",f(s.price)],["RSI 1D",s.rsi1D],["RSI 4H",s.rsi4H],["Dist. EMA",`${s.distEMA}%`]].map(([k,v])=><Row key={k} k={k} v={v}/>)}</div>
+                <div style={{marginTop:8,height:6,background:"#0A0F1A",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.score}%`,background:s.score>=70?C.gold:s.score>=50?C.orange:"#444",borderRadius:3,transition:"width .5s"}}/></div>
+              </Card>)}
+            </>}
+
+            {/* ── POSICIONES ── */}
+            {tab==="positions"&&<>
+              <Card>
+                <Title>📊 EXPOSICIÓN TOTAL</Title>
+                {(()=>{
+                  const tr=positions.reduce((a,p)=>a+(p.riskUSDT||0),0),cap=parseFloat(capital)||200,pct=(tr/cap*100).toFixed(1);
+                  return<>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                      <div><div style={{color:C.gray,fontSize:10}}>EN RIESGO</div><div style={{fontSize:26,fontWeight:700,color:+pct>3?C.red:+pct>2?C.orange:C.green}}>{pct}%</div></div>
+                      <div style={{textAlign:"right"}}><div style={{color:C.gray,fontSize:10}}>POSICIONES</div><div style={{fontSize:26,fontWeight:700,color:C.gold}}>{positions.length}/3</div></div>
+                    </div>
+                    <div style={{background:"#0A0F1A",borderRadius:4,height:8,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.min(100,+pct/4*100)}%`,background:+pct>3?C.red:+pct>2?C.orange:C.green,borderRadius:4,transition:"width .3s"}}/></div>
+                    {!positions.length&&<div style={{color:C.gray,textAlign:"center",marginTop:14,fontSize:12}}>Sin posiciones abiertas</div>}
+                  </>;
+                })()}
+              </Card>
+              {positions.map(pos=>{
+                const{pct}=getPnL(pos),cp=priceTick[pos.pair]||pos.entry;
+                return<div key={pos.id} style={{background:C.card,border:`1px solid ${pct>=0?"#1A3A2A":"#2A1A1A"}`,borderRadius:10,padding:14,marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <div><span style={{fontWeight:700,color:C.gold,fontSize:14}}>{pos.pair}</span><Pill c={pos.dir==="LONG"?C.green:C.red}>{pos.dir}</Pill><Pill c={C.blue}>{pos.type}</Pill></div>
+                    <div style={{background:pct>=0?"#0D2818":"#1E0A0A",color:pct>=0?C.green:C.red,padding:"3px 10px",borderRadius:4,fontSize:13,fontWeight:700}}>{pct>=0?"+":""}{pct.toFixed(2)}%</div>
+                  </div>
+                  {[["Entrada",f(pos.entry)],["Precio act.",f(cp),pct>=0?C.green:C.red],["SL",f(pos.sl),C.red],["TP1",f(pos.tp1),C.green],["TP2",f(pos.tp2),C.green],["Leverage",`${pos.leverage}x`,pos.leverage>=8?C.red:C.text],["Riesgo",`${(pos.riskUSDT||0).toFixed(2)} USDT`],["Score",`${pos.score}/10`]].map(([k,v,vc])=><Row key={k} k={k} v={v} vc={vc}/>)}
+                  <div style={{display:"flex",gap:6,marginTop:10}}>
+                    {["TP1","TP2","TP3","BE","SL"].map(r=><button key={r} onClick={()=>closePos(pos,r)} style={{flex:1,padding:"7px 2px",background:r==="SL"?"#1E0A0A":r==="BE"?"#0A0A1E":"#0D2818",border:`1px solid ${r==="SL"?C.red:r==="BE"?C.blue:C.green}`,borderRadius:5,color:r==="SL"?C.red:r==="BE"?C.blue:C.green,fontFamily:"'Courier New',monospace",fontSize:11,fontWeight:700,cursor:"pointer"}}>{r}</button>)}
+                  </div>
+                </div>;
+              })}
+            </>}
+
+            {/* ── STATS ── */}
+            {tab==="stats"&&(()=>{
+              const s=stats();
+              if(!s) return<Card style={{textAlign:"center",padding:40}}><div style={{fontSize:32,marginBottom:10}}>📈</div><div style={{color:C.gray}}>Sin operaciones en el diario</div><div style={{color:C.gray,fontSize:11,marginTop:6}}>Cierra posiciones para generar estadísticas</div></Card>;
+              return<>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+                  {[["WIN RATE",`${s.winRate}%`,+s.winRate>=60?C.green:+s.winRate>=40?C.orange:C.red],["TOTAL OPS",s.total,C.gold]].map(([l,v,c])=><Card key={l}><div style={{color:C.gray,fontSize:10,marginBottom:6}}>{l}</div><div style={{fontSize:28,fontWeight:700,color:c}}>{v}</div></Card>)}
+                </div>
+                <Card><Title>🤖 POR ESTRATEGIA</Title>
+                  {Object.entries(s.byT).filter(([,v])=>v.t>0).map(([t,data])=>{const wr=data.t?data.w/data.t*100:0;return<div key={t} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><div><div style={{fontWeight:700}}>{t}</div><div style={{color:C.gray,fontSize:11}}>{data.t} ops · {data.w} ganadoras</div></div><div style={{background:wr>=60?"#0D2818":"#1E0A0A",color:wr>=60?C.green:C.red,padding:"3px 10px",borderRadius:4,fontWeight:700}}>{wr.toFixed(0)}%</div></div>;})}
+                </Card>
+                <Card><Title>📈 POR PAR</Title>
+                  {Object.entries(s.byP).sort((a,b)=>b[1].t-a[1].t).map(([pair,data])=>{const wr=data.t?data.w/data.t*100:0;return<div key={pair} style={{marginBottom:10}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontWeight:700}}>{pair}</span><span style={{color:wr>=60?C.green:wr>=40?C.orange:C.red,fontWeight:700}}>{wr.toFixed(0)}% ({data.w}/{data.t})</span></div><div style={{background:"#0A0F1A",borderRadius:3,height:5}}><div style={{height:"100%",width:`${wr}%`,background:wr>=60?C.green:wr>=40?C.orange:C.red,borderRadius:3}}/></div></div>;})}
+                </Card>
+                <button onClick={()=>{if(confirm("¿Limpiar diario?"))saveDiary([]);}} style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:"9px",color:C.red,fontFamily:"'Courier New',monospace",fontSize:12,fontWeight:700,cursor:"pointer",width:"100%"}}>Limpiar diario completo</button>
+              </>;
+            })()}
+
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .then(() => console.log('SW registrado'))
+          .catch(e => console.log('SW error:', e));
+      });
+    }
+  </script>
+</body>
+</html>
