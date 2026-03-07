@@ -565,9 +565,9 @@
                 </div>
               </Card>}
               <Card>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                  <Title style={{marginBottom:0}}>📋 PEGAR MENSAJES DEL BOT</Title>
-                  {raw&&<button onClick={()=>{setRaw("");setParsed([]);setResults([]);setParseError("");}} style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:5,padding:"3px 10px",color:C.red,fontFamily:"'Courier New',monospace",fontSize:11,fontWeight:700,cursor:"pointer"}}>✕ LIMPIAR</button>}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2}}>PEGAR MENSAJES DEL BOT</div>
+                  {raw && <button onClick={()=>{setRaw("");setParsed([]);setResults([]);setParseError("");}} style={{background:"#1A0A0A",border:"1px solid #E74C3C",borderRadius:5,padding:"3px 10px",color:"#E74C3C",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>LIMPIAR</button>}
                 </div>
                 <textarea value={raw} onChange={e=>{setRaw(e.target.value);setParsed([]);setResults([]);setParseError("");}}
                   placeholder={"Pega mensajes de Telegram: SMT, BMSB, alertas, RSI Extremo Fase 1/2/3.\n\nPuedes pegar múltiples mensajes seguidos."}
@@ -619,32 +619,30 @@
                 {loadingPairs.length>0&&<div style={{color:C.orange,fontSize:11,marginBottom:8}}>Analizando: {loadingPairs.join(", ")}...</div>}
                 <Btn onClick={handleScan} disabled={scanning} color={scanning?C.gray:C.gold} style={{width:"100%"}}>{scanning?"⏳ ESCANEANDO...":"🔍 ESCANEAR AHORA"}</Btn>
               </Card>
-              {scanner.length>0&&<Card style={{padding:0,overflow:"hidden"}}>
-                {/* cabecera */}
-                <div style={{display:"grid",gridTemplateColumns:"2fr 1.1fr 1.1fr 1.1fr 1.3fr 1fr",background:"#0A0F1A",borderBottom:`1px solid ${C.border}`,padding:"7px 10px"}}>
-                  {["PAR","DIR","RSI1D","RSI4H","DIST","SCORE"].map(h=><span key={h} style={{color:C.gray,fontSize:10,fontWeight:700,letterSpacing:1}}>{h}</span>)}
-                </div>
-                {scanner.map((s,i)=>{
-                  const rsi4Num=parseFloat(s.rsi4H);
-                  const rsiColor=rsi4Num<35?C.green:rsi4Num>65?C.red:C.text;
-                  const rsi1Num=parseFloat(s.rsi1D);
-                  const rsi1Color=rsi1Num<35?C.green:rsi1Num>65?C.red:C.text;
-                  const scoreColor=s.score>=70?C.gold:s.score>=50?C.orange:C.gray;
-                  const distNum=parseFloat(s.distEMA);
-                  const distColor=distNum<1?C.gold:distNum<3?C.orange:C.gray;
-                  return<div key={s.pair} style={{display:"grid",gridTemplateColumns:"2fr 1.1fr 1.1fr 1.1fr 1.3fr 1fr",padding:"8px 10px",borderBottom:i<scanner.length-1?`1px solid ${C.border}`:"none",background:i%2===0?"transparent":"#0A0C12",alignItems:"center"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:4}}>
-                      <span style={{fontWeight:700,color:C.gold,fontSize:13}}>{s.pair}</span>
-                      {s.ranging&&<span style={{background:C.orange+"22",color:C.orange,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:700}}>RNG</span>}
+              {scanner.length>0&&(()=>{
+                const cols="2fr 1.1fr 1.1fr 1.1fr 1.3fr 1fr";
+                const hdr=["PAR","DIR","RSI1D","RSI4H","DIST","SCORE"];
+                return(
+                  <Card style={{padding:0,overflow:"hidden"}}>
+                    <div style={{display:"grid",gridTemplateColumns:cols,background:"#0A0F1A",borderBottom:"1px solid #1E293B",padding:"7px 10px"}}>
+                      {hdr.map(h=><span key={h} style={{color:C.gray,fontSize:10,fontWeight:700,letterSpacing:1}}>{h}</span>)}
                     </div>
-                    <span style={{color:s.dir==="LONG"?C.green:C.red,fontWeight:700,fontSize:12}}>{s.dir}</span>
-                    <span style={{color:rsi1Color,fontSize:12,fontWeight:600}}>{s.rsi1D}</span>
-                    <span style={{color:rsiColor,fontSize:12,fontWeight:600}}>{s.rsi4H}</span>
-                    <span style={{color:distColor,fontSize:12,fontWeight:600}}>{s.distEMA}%</span>
-                    <span style={{color:scoreColor,fontWeight:700,fontSize:13}}>{s.score}</span>
-                  </div>;
-                })}
-              </Card>}
+                    {scanner.map((s,i)=>(
+                      <div key={s.pair} style={{display:"grid",gridTemplateColumns:cols,padding:"8px 10px",borderBottom:i<scanner.length-1?"1px solid #1E293B":"none",background:i%2===0?"transparent":"#0A0C12",alignItems:"center"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:4}}>
+                          <span style={{fontWeight:700,color:C.gold,fontSize:13}}>{s.pair}</span>
+                          {s.ranging&&<span style={{background:"#E67E2222",color:C.orange,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:700}}>RNG</span>}
+                        </div>
+                        <span style={{color:s.dir==="LONG"?C.green:C.red,fontWeight:700,fontSize:12}}>{s.dir}</span>
+                        <span style={{color:parseFloat(s.rsi1D)<35?C.green:parseFloat(s.rsi1D)>65?C.red:C.text,fontSize:12,fontWeight:600}}>{s.rsi1D}</span>
+                        <span style={{color:parseFloat(s.rsi4H)<35?C.green:parseFloat(s.rsi4H)>65?C.red:C.text,fontSize:12,fontWeight:600}}>{s.rsi4H}</span>
+                        <span style={{color:parseFloat(s.distEMA)<1?C.gold:parseFloat(s.distEMA)<3?C.orange:C.gray,fontSize:12,fontWeight:600}}>{s.distEMA}%</span>
+                        <span style={{color:s.score>=70?C.gold:s.score>=50?C.orange:C.gray,fontWeight:700,fontSize:13}}>{s.score}</span>
+                      </div>
+                    ))}
+                  </Card>
+                );
+              })()}
             </>}
 
             {/* ── POSICIONES ── */}
