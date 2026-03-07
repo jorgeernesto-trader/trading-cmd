@@ -565,7 +565,10 @@
                 </div>
               </Card>}
               <Card>
-                <Title>📋 PEGAR MENSAJES DEL BOT</Title>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                  <Title style={{marginBottom:0}}>📋 PEGAR MENSAJES DEL BOT</Title>
+                  {raw&&<button onClick={()=>{setRaw("");setParsed([]);setResults([]);setParseError("");}} style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:5,padding:"3px 10px",color:C.red,fontFamily:"'Courier New',monospace",fontSize:11,fontWeight:700,cursor:"pointer"}}>✕ LIMPIAR</button>}
+                </div>
                 <textarea value={raw} onChange={e=>{setRaw(e.target.value);setParsed([]);setResults([]);setParseError("");}}
                   placeholder={"Pega mensajes de Telegram: SMT, BMSB, alertas, RSI Extremo Fase 1/2/3.\n\nPuedes pegar múltiples mensajes seguidos."}
                   style={{width:"100%",minHeight:160,background:"#0A0F1A",border:`1px solid ${parseError?C.red:C.border}`,borderRadius:8,padding:12,color:C.text,fontFamily:"'Courier New',monospace",fontSize:12,resize:"vertical",outline:"none",boxSizing:"border-box",lineHeight:1.6}}/>
@@ -616,13 +619,31 @@
                 {loadingPairs.length>0&&<div style={{color:C.orange,fontSize:11,marginBottom:8}}>Analizando: {loadingPairs.join(", ")}...</div>}
                 <Btn onClick={handleScan} disabled={scanning} color={scanning?C.gray:C.gold} style={{width:"100%"}}>{scanning?"⏳ ESCANEANDO...":"🔍 ESCANEAR AHORA"}</Btn>
               </Card>
-              {scanner.map(s=><Card key={s.pair} style={{borderLeft:`3px solid ${s.score>=70?C.gold:s.score>=50?C.orange:C.border}`}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                  <div><span style={{fontWeight:700,color:C.gold,fontSize:14}}>{s.pair}</span><Pill c={s.dir==="LONG"?C.green:C.red}>{s.dir}</Pill>{s.ranging&&<Pill c={C.orange}>RANGO</Pill>}</div>
-                  <div style={{textAlign:"right"}}><div style={{color:s.score>=70?C.gold:s.score>=50?C.orange:C.gray,fontWeight:700,fontSize:18}}>{s.score}%</div><div style={{color:C.gray,fontSize:10}}>score técnico</div></div>
+              {scanner.length>0&&<Card style={{padding:0,overflow:"hidden"}}>
+                {/* cabecera */}
+                <div style={{display:"grid",gridTemplateColumns:"2fr 1.1fr 1.1fr 1.1fr 1.3fr 1fr",background:"#0A0F1A",borderBottom:`1px solid ${C.border}`,padding:"7px 10px"}}>
+                  {["PAR","DIR","RSI1D","RSI4H","DIST","SCORE"].map(h=><span key={h} style={{color:C.gray,fontSize:10,fontWeight:700,letterSpacing:1}}>{h}</span>)}
                 </div>
-                <div style={{background:"#0A0F1A",borderRadius:6,padding:8}}>{[["Precio",f(s.price)],["RSI 1D",s.rsi1D],["RSI 4H",s.rsi4H],["Dist. EMA",`${s.distEMA}%`]].map(([k,v])=><Row key={k} k={k} v={v}/>)}</div>
-                <div style={{marginTop:8,height:6,background:"#0A0F1A",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${s.score}%`,background:s.score>=70?C.gold:s.score>=50?C.orange:"#444",borderRadius:3,transition:"width .5s"}}/></div>
+                {scanner.map((s,i)=>{
+                  const rsi4Num=parseFloat(s.rsi4H);
+                  const rsiColor=rsi4Num<35?C.green:rsi4Num>65?C.red:C.text;
+                  const rsi1Num=parseFloat(s.rsi1D);
+                  const rsi1Color=rsi1Num<35?C.green:rsi1Num>65?C.red:C.text;
+                  const scoreColor=s.score>=70?C.gold:s.score>=50?C.orange:C.gray;
+                  const distNum=parseFloat(s.distEMA);
+                  const distColor=distNum<1?C.gold:distNum<3?C.orange:C.gray;
+                  return<div key={s.pair} style={{display:"grid",gridTemplateColumns:"2fr 1.1fr 1.1fr 1.1fr 1.3fr 1fr",padding:"8px 10px",borderBottom:i<scanner.length-1?`1px solid ${C.border}`:"none",background:i%2===0?"transparent":"#0A0C12",alignItems:"center"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:4}}>
+                      <span style={{fontWeight:700,color:C.gold,fontSize:13}}>{s.pair}</span>
+                      {s.ranging&&<span style={{background:C.orange+"22",color:C.orange,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:700}}>RNG</span>}
+                    </div>
+                    <span style={{color:s.dir==="LONG"?C.green:C.red,fontWeight:700,fontSize:12}}>{s.dir}</span>
+                    <span style={{color:rsi1Color,fontSize:12,fontWeight:600}}>{s.rsi1D}</span>
+                    <span style={{color:rsiColor,fontSize:12,fontWeight:600}}>{s.rsi4H}</span>
+                    <span style={{color:distColor,fontSize:12,fontWeight:600}}>{s.distEMA}%</span>
+                    <span style={{color:scoreColor,fontWeight:700,fontSize:13}}>{s.score}</span>
+                  </div>;
+                })}
               </Card>)}
             </>}
 
