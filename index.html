@@ -457,6 +457,10 @@
       const [scanning,setScanning]=useState(false);
       const [priceTick,setPriceTick]=useState({});
       const [parseError,setParseError]=useState("");
+      const [editingPos,setEditingPos]=useState(null);
+      const [showAddManual,setShowAddManual]=useState(false);
+      const [editingDiary,setEditingDiary]=useState(null);
+      const [confirmClear,setConfirmClear]=useState(false);
 
       useEffect(()=>{
         const p=localStorage.getItem("pos_v3"); if(p) setPositions(JSON.parse(p));
@@ -522,14 +526,31 @@
         savePos([...positions,{id:uid(),pair:sig.pair,dir:sig.dir,type:sig.type,entry:o.entry,sl:o.sl,tp1:o.tp1,tp2:o.tp2,tp3:o.tp3,leverage:o.leverage,size:o.size,riskUSDT:o.riskUSDT,score:result.score,openedAt:new Date().toISOString(),mode}]);
         setTab("positions");
       };
-      const closePos=(pos,result)=>{saveDiary([{...pos,result,closedAt:new Date().toISOString()},...diary]);savePos(positions.filter(p=>p.id!==pos.id));};
-      const getPnL=(pos)=>{const cp=priceTick[pos.pair]||pos.entry,pct=pos.dir==="LONG"?(cp-pos.entry)/pos.entry*100:(pos.entry-cp)/pos.entry*100;return{pct};};
+      const updatePos=(id,fields)=>{savePos(positions.map(p=>p.id===id?{...p,...fields}:p));};
+      const closePos=(pos,result,closePrice)=>{
+        const cp=closePrice||priceTick[pos.pair]||pos.entry;
+        const pnlPct=pos.dir==="LONG"?(cp-pos.entry)/pos.entry*100:(pos.entry-cp)/pos.entry*100;
+        const pnlUSDT=+(pos.riskUSDT*(pnlPct/(Math.abs(pos.entry-pos.sl)/pos.entry*100))).toFixed(2);
+        saveDiary([{...pos,result,closePrice:cp,pnlPct:+pnlPct.toFixed(2),pnlUSDT,closedAt:new Date().toISOString()},...diary]);
+        savePos(positions.filter(p=>p.id!==pos.id));
+      };
+      const getPnL=(pos)=>{const cp=priceTick[pos.pair]||pos.entry,pct=pos.dir==="LONG"?(cp-pos.entry)/pos.entry*100:(pos.entry-cp)/pos.entry*100;return{pct,cp};};
 
       const stats=()=>{
         if(!diary.length) return null;
-        const wins=diary.filter(d=>d.result!=="SL"),byT={SMT:{w:0,t:0},BMSB:{w:0,t:0},ALERTA:{w:0,t:0},FASE3:{w:0,t:0}},byP={};
-        diary.forEach(d=>{const t=d.type||"BMSB";if(byT[t]){byT[t].t++;if(d.result!=="SL")byT[t].w++;}if(!byP[d.pair])byP[d.pair]={w:0,t:0};byP[d.pair].t++;if(d.result!=="SL")byP[d.pair].w++;});
-        return{total:diary.length,winRate:(wins.length/diary.length*100).toFixed(0),byT,byP};
+        const isWin=d=>d.result!=="SL"&&d.result!=="MANUAL_LOSS";
+        const wins=diary.filter(isWin);
+        const losses=diary.filter(d=>!isWin(d));
+        const byT={SMT:{w:0,t:0,pnl:0},BMSB:{w:0,t:0,pnl:0},ALERTA:{w:0,t:0,pnl:0},FASE3:{w:0,t:0,pnl:0},OTRA:{w:0,t:0,pnl:0}},byP={};
+        const totalPnl=diary.reduce((a,d)=>a+(d.pnlUSDT||0),0);
+        diary.forEach(d=>{
+          const t=d.type||"OTRA";
+          const key=byT[t]!==undefined?t:"OTRA";
+          byT[key].t++;if(isWin(d))byT[key].w++;byT[key].pnl+=(d.pnlUSDT||0);
+          if(!byP[d.pair])byP[d.pair]={w:0,t:0,pnl:0};
+          byP[d.pair].t++;if(isWin(d))byP[d.pair].w++;byP[d.pair].pnl+=(d.pnlUSDT||0);
+        });
+        return{total:diary.length,winRate:(wins.length/diary.length*100).toFixed(0),lossRate:(losses.length/diary.length*100).toFixed(0),totalPnl:+totalPnl.toFixed(2),byT,byP};
       };
 
       const tabs=[["radar","🎯 SEÑALES"],["scanner","📡 SCANNER"],["positions","📊 POSIC."],["stats","📈 STATS"]];
@@ -662,36 +683,230 @@
                 })()}
               </Card>
               {positions.map(pos=>{
-                const{pct}=getPnL(pos),cp=priceTick[pos.pair]||pos.entry;
-                return<div key={pos.id} style={{background:C.card,border:`1px solid ${pct>=0?"#1A3A2A":"#2A1A1A"}`,borderRadius:10,padding:14,marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <div><span style={{fontWeight:700,color:C.gold,fontSize:14}}>{pos.pair}</span><Pill c={pos.dir==="LONG"?C.green:C.red}>{pos.dir}</Pill><Pill c={C.blue}>{pos.type}</Pill></div>
-                    <div style={{background:pct>=0?"#0D2818":"#1E0A0A",color:pct>=0?C.green:C.red,padding:"3px 10px",borderRadius:4,fontSize:13,fontWeight:700}}>{pct>=0?"+":""}{pct.toFixed(2)}%</div>
+                const{pct,cp}=getPnL(pos);
+                const isEditing=editingPos===pos.id;
+                const fld=(k,label,color)=>(
+                  <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",borderBottom:"1px solid #1A2235"}}>
+                    <span style={{color:C.gray,fontSize:11}}>{label}</span>
+                    {isEditing&&["entry","sl","tp1","tp2","tp3"].includes(k)
+                      ?<input defaultValue={pos[k]} onBlur={e=>updatePos(pos.id,{[k]:+e.target.value})}
+                          style={{width:90,background:"#0A0F1A",border:"1px solid #F0A500",borderRadius:4,padding:"2px 6px",color:"#F0A500",fontFamily:"inherit",fontSize:12,textAlign:"right",outline:"none"}}/>
+                      :<span style={{color:color||C.text,fontWeight:600,fontSize:12}}>{f(pos[k])}</span>
+                    }
                   </div>
-                  {[["Entrada",f(pos.entry)],["Precio act.",f(cp),pct>=0?C.green:C.red],["SL",f(pos.sl),C.red],["TP1",f(pos.tp1),C.green],["TP2",f(pos.tp2),C.green],["Leverage",`${pos.leverage}x`,pos.leverage>=8?C.red:C.text],["Riesgo",`${(pos.riskUSDT||0).toFixed(2)} USDT`],["Score",`${pos.score}/10`]].map(([k,v,vc])=><Row key={k} k={k} v={v} vc={vc}/>)}
-                  <div style={{display:"flex",gap:6,marginTop:10}}>
-                    {["TP1","TP2","TP3","BE","SL"].map(r=><button key={r} onClick={()=>closePos(pos,r)} style={{flex:1,padding:"7px 2px",background:r==="SL"?"#1E0A0A":r==="BE"?"#0A0A1E":"#0D2818",border:`1px solid ${r==="SL"?C.red:r==="BE"?C.blue:C.green}`,borderRadius:5,color:r==="SL"?C.red:r==="BE"?C.blue:C.green,fontFamily:"'Courier New',monospace",fontSize:11,fontWeight:700,cursor:"pointer"}}>{r}</button>)}
+                );
+                return(
+                  <div key={pos.id} style={{background:C.card,border:`1px solid ${pct>=0?"#1A3A2A":"#2A1A1A"}`,borderRadius:10,padding:14,marginBottom:10}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <div>
+                        <span style={{fontWeight:700,color:C.gold,fontSize:14}}>{pos.pair}</span>
+                        <Pill c={pos.dir==="LONG"?C.green:C.red}>{pos.dir}</Pill>
+                        <Pill c={C.blue}>{pos.type}</Pill>
+                      </div>
+                      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                        <div style={{background:pct>=0?"#0D2818":"#1E0A0A",color:pct>=0?C.green:C.red,padding:"3px 10px",borderRadius:4,fontSize:13,fontWeight:700}}>{pct>=0?"+":""}{pct.toFixed(2)}%</div>
+                        <button onClick={()=>setEditingPos(isEditing?null:pos.id)} style={{background:isEditing?"#F0A50022":"#0A0F1A",border:`1px solid ${isEditing?C.gold:C.border}`,borderRadius:4,padding:"3px 8px",color:isEditing?C.gold:C.gray,fontFamily:"inherit",fontSize:10,fontWeight:700,cursor:"pointer"}}>{isEditing?"LISTO":"EDITAR"}</button>
+                      </div>
+                    </div>
+                    {fld("entry","Entrada",C.gold)}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",borderBottom:"1px solid #1A2235"}}>
+                      <span style={{color:C.gray,fontSize:11}}>Precio act.</span>
+                      <span style={{color:pct>=0?C.green:C.red,fontWeight:600,fontSize:12}}>{f(cp)}</span>
+                    </div>
+                    {fld("sl","Stop Loss",C.red)}
+                    {fld("tp1","TP1",C.green)}
+                    {fld("tp2","TP2",C.green)}
+                    {fld("tp3","TP3",C.green)}
+                    <Row k="Leverage" v={`${pos.leverage}x`} vc={pos.leverage>=8?C.red:C.text}/>
+                    <Row k="Riesgo" v={`${(pos.riskUSDT||0).toFixed(2)} USDT`}/>
+                    <Row k="Score" v={`${pos.score}/10`}/>
+                    <div style={{marginTop:10}}>
+                      <div style={{color:C.gray,fontSize:10,marginBottom:6}}>ACTUALIZAR (no cierra)</div>
+                      <div style={{display:"flex",gap:5,marginBottom:8}}>
+                        {["TP1","TP2","BE"].map(r=>(
+                          <button key={r} onClick={()=>updatePos(pos.id,{note:r,updatedAt:new Date().toISOString()})}
+                            style={{flex:1,padding:"7px 2px",background:r==="BE"?"#0A0A1E":"#0D1A10",border:`1px solid ${r==="BE"?C.blue:C.green}`,borderRadius:5,color:r==="BE"?C.blue:C.green,fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>{r}</button>
+                        ))}
+                      </div>
+                      <div style={{color:C.gray,fontSize:10,marginBottom:6}}>CERRAR POSICION</div>
+                      <div style={{display:"flex",gap:5}}>
+                        {["TP3","SL"].map(r=>(
+                          <button key={r} onClick={()=>closePos(pos,r)}
+                            style={{flex:1,padding:"7px 2px",background:r==="SL"?"#1E0A0A":"#0D2818",border:`1px solid ${r==="SL"?C.red:C.green}`,borderRadius:5,color:r==="SL"?C.red:C.green,fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>{r}</button>
+                        ))}
+                        <button onClick={()=>{const p=prompt("Precio de cierre:");if(p&&!isNaN(+p))closePos(pos,"MANUAL",+p);}}
+                          style={{flex:1,padding:"7px 2px",background:"#0A0A1E",border:`1px solid ${C.orange}`,borderRadius:5,color:C.orange,fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>MANUAL</button>
+                      </div>
+                    </div>
                   </div>
-                </div>;
+                );
               })}
             </>}
 
             {/* ── STATS ── */}
             {tab==="stats"&&(()=>{
               const s=stats();
-              if(!s) return<Card style={{textAlign:"center",padding:40}}><div style={{fontSize:32,marginBottom:10}}>📈</div><div style={{color:C.gray}}>Sin operaciones en el diario</div><div style={{color:C.gray,fontSize:11,marginTop:6}}>Cierra posiciones para generar estadísticas</div></Card>;
-              return<>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-                  {[["WIN RATE",`${s.winRate}%`,+s.winRate>=60?C.green:+s.winRate>=40?C.orange:C.red],["TOTAL OPS",s.total,C.gold]].map(([l,v,c])=><Card key={l}><div style={{color:C.gray,fontSize:10,marginBottom:6}}>{l}</div><div style={{fontSize:28,fontWeight:700,color:c}}>{v}</div></Card>)}
-                </div>
-                <Card><Title>🤖 POR ESTRATEGIA</Title>
-                  {Object.entries(s.byT).filter(([,v])=>v.t>0).map(([t,data])=>{const wr=data.t?data.w/data.t*100:0;return<div key={t} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><div><div style={{fontWeight:700}}>{t}</div><div style={{color:C.gray,fontSize:11}}>{data.t} ops · {data.w} ganadoras</div></div><div style={{background:wr>=60?"#0D2818":"#1E0A0A",color:wr>=60?C.green:C.red,padding:"3px 10px",borderRadius:4,fontWeight:700}}>{wr.toFixed(0)}%</div></div>;})}
-                </Card>
-                <Card><Title>📈 POR PAR</Title>
-                  {Object.entries(s.byP).sort((a,b)=>b[1].t-a[1].t).map(([pair,data])=>{const wr=data.t?data.w/data.t*100:0;return<div key={pair} style={{marginBottom:10}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontWeight:700}}>{pair}</span><span style={{color:wr>=60?C.green:wr>=40?C.orange:C.red,fontWeight:700}}>{wr.toFixed(0)}% ({data.w}/{data.t})</span></div><div style={{background:"#0A0F1A",borderRadius:3,height:5}}><div style={{height:"100%",width:`${wr}%`,background:wr>=60?C.green:wr>=40?C.orange:C.red,borderRadius:3}}/></div></div>;})}
-                </Card>
-                <button onClick={()=>{if(confirm("¿Limpiar diario?"))saveDiary([]);}} style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:"9px",color:C.red,fontFamily:"'Courier New',monospace",fontSize:12,fontWeight:700,cursor:"pointer",width:"100%"}}>Limpiar diario completo</button>
-              </>;
+
+              // Formulario añadir manual
+              const ManualForm=()=>{
+                const [mp,setMp]=useState("");const [mdir,setMdir]=useState("LONG");const [mtype,setMtype]=useState("ALERTA");
+                const [mresult,setMresult]=useState("TP3");const [mpnl,setMpnl]=useState("");
+                const add=()=>{
+                  if(!mp) return;
+                  const isW=mresult!=="SL"&&mresult!=="MANUAL_LOSS";
+                  saveDiary([{id:uid(),pair:mp.toUpperCase(),dir:mdir,type:mtype,result:mresult,pnlUSDT:+mpnl||0,pnlPct:0,riskUSDT:0,entry:0,sl:0,tp1:0,tp2:0,tp3:0,score:0,closedAt:new Date().toISOString(),manual:true},...diary]);
+                  setShowAddManual(false);
+                };
+                return(
+                  <Card style={{borderColor:C.gold}}>
+                    <Title>+ AÑADIR OPERACION MANUAL</Title>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                      <div>
+                        <div style={{color:C.gray,fontSize:10,marginBottom:4}}>PAR</div>
+                        <input value={mp} onChange={e=>setMp(e.target.value)} placeholder="BTC" style={{width:"100%",background:"#0A0F1A",border:"1px solid #1E293B",borderRadius:5,padding:"6px 8px",color:C.text,fontFamily:"inherit",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                      </div>
+                      <div>
+                        <div style={{color:C.gray,fontSize:10,marginBottom:4}}>P&L (USDT)</div>
+                        <input value={mpnl} onChange={e=>setMpnl(e.target.value)} placeholder="0.00" style={{width:"100%",background:"#0A0F1A",border:"1px solid #1E293B",borderRadius:5,padding:"6px 8px",color:C.text,fontFamily:"inherit",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:6,marginBottom:8}}>
+                      {["LONG","SHORT"].map(d=><div key={d} onClick={()=>setMdir(d)} style={{flex:1,padding:"6px 0",textAlign:"center",borderRadius:5,cursor:"pointer",background:mdir===d?(d==="LONG"?"#0D2818":"#1E0A0A"):"#0A0F1A",border:`1px solid ${mdir===d?(d==="LONG"?C.green:C.red):C.border}`,color:mdir===d?(d==="LONG"?C.green:C.red):C.gray,fontSize:12,fontWeight:700}}>{d}</div>)}
+                    </div>
+                    <div style={{display:"flex",gap:6,marginBottom:8}}>
+                      {["SMT","BMSB","ALERTA","OTRA"].map(t=><div key={t} onClick={()=>setMtype(t)} style={{flex:1,padding:"6px 0",textAlign:"center",borderRadius:5,cursor:"pointer",background:mtype===t?"#0D1A2A":"#0A0F1A",border:`1px solid ${mtype===t?C.blue:C.border}`,color:mtype===t?C.blue:C.gray,fontSize:11,fontWeight:700}}>{t}</div>)}
+                    </div>
+                    <div style={{display:"flex",gap:6,marginBottom:10}}>
+                      {["TP1","TP2","TP3","SL","MANUAL_LOSS"].map(r=><div key={r} onClick={()=>setMresult(r)} style={{flex:1,padding:"5px 0",textAlign:"center",borderRadius:5,cursor:"pointer",background:mresult===r?(r==="SL"||r==="MANUAL_LOSS"?"#1E0A0A":"#0D2818"):"#0A0F1A",border:`1px solid ${mresult===r?(r==="SL"||r==="MANUAL_LOSS"?C.red:C.green):C.border}`,color:mresult===r?(r==="SL"||r==="MANUAL_LOSS"?C.red:C.green):C.gray,fontSize:10,fontWeight:700}}>{r}</div>)}
+                    </div>
+                    <div style={{display:"flex",gap:8}}>
+                      <button onClick={add} style={{flex:1,background:C.gold,border:"none",borderRadius:6,padding:"9px",color:"#080B14",fontFamily:"inherit",fontSize:12,fontWeight:700,cursor:"pointer"}}>GUARDAR</button>
+                      <button onClick={()=>setShowAddManual(false)} style={{flex:1,background:"#0A0F1A",border:"1px solid #1E293B",borderRadius:6,padding:"9px",color:C.gray,fontFamily:"inherit",fontSize:12,fontWeight:700,cursor:"pointer"}}>CANCELAR</button>
+                    </div>
+                  </Card>
+                );
+              };
+
+              // Formulario editar entrada del diario
+              const EditDiary=({d})=>{
+                const [ep,setEp]=useState(d.pnlUSDT||0);
+                const [er,setEr]=useState(d.result);
+                const save=()=>{saveDiary(diary.map(x=>x.id===d.id?{...x,pnlUSDT:+ep,result:er}:x));setEditingDiary(null);};
+                return(
+                  <div style={{background:"#0A0F1A",borderRadius:6,padding:10,marginTop:6}}>
+                    <div style={{display:"flex",gap:6,marginBottom:8}}>
+                      {["TP1","TP2","TP3","SL","MANUAL","MANUAL_LOSS"].map(r=>(
+                        <div key={r} onClick={()=>setEr(r)} style={{flex:1,padding:"4px 0",textAlign:"center",borderRadius:4,cursor:"pointer",background:er===r?(r==="SL"||r==="MANUAL_LOSS"?"#1E0A0A":"#0D2818"):"#080B14",border:`1px solid ${er===r?(r==="SL"||r==="MANUAL_LOSS"?C.red:C.green):C.border}`,color:er===r?(r==="SL"||r==="MANUAL_LOSS"?C.red:C.green):C.gray,fontSize:9,fontWeight:700}}>{r}</div>
+                      ))}
+                    </div>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <input value={ep} onChange={e=>setEp(e.target.value)} style={{flex:1,background:"#080B14",border:"1px solid #F0A500",borderRadius:4,padding:"6px 8px",color:"#F0A500",fontFamily:"inherit",fontSize:12,outline:"none"}} placeholder="P&L USDT"/>
+                      <button onClick={save} style={{background:C.gold,border:"none",borderRadius:4,padding:"6px 14px",color:"#080B14",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>OK</button>
+                      <button onClick={()=>setEditingDiary(null)} style={{background:"#0A0F1A",border:"1px solid #1E293B",borderRadius:4,padding:"6px 10px",color:C.gray,fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>X</button>
+                    </div>
+                  </div>
+                );
+              };
+
+              return(
+                <>
+                  {/* Botón añadir manual */}
+                  <button onClick={()=>setShowAddManual(!showAddManual)} style={{width:"100%",background:"#0A0F1A",border:"1px solid #F0A500",borderRadius:6,padding:"9px",color:"#F0A500",fontFamily:"inherit",fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:10}}>+ AÑADIR OPERACION MANUAL</button>
+                  {showAddManual&&<ManualForm/>}
+
+                  {!s&&<Card style={{textAlign:"center",padding:40}}><div style={{fontSize:32,marginBottom:10}}>📈</div><div style={{color:C.gray}}>Sin operaciones en el diario</div></Card>}
+
+                  {s&&(()=>{
+                    return(
+                      <>
+                        {/* Resumen */}
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+                          <Card><div style={{color:C.green,fontSize:10,marginBottom:4}}>WIN RATE</div><div style={{fontSize:22,fontWeight:700,color:+s.winRate>=60?C.green:+s.winRate>=40?C.orange:C.red}}>{s.winRate}%</div></Card>
+                          <Card><div style={{color:C.red,fontSize:10,marginBottom:4}}>LOSS RATE</div><div style={{fontSize:22,fontWeight:700,color:+s.lossRate>=60?C.red:+s.lossRate>=40?C.orange:C.gray}}>{s.lossRate}%</div></Card>
+                          <Card><div style={{color:C.gold,fontSize:10,marginBottom:4}}>TOTAL OPS</div><div style={{fontSize:22,fontWeight:700,color:C.gold}}>{s.total}</div></Card>
+                        </div>
+                        <Card style={{borderColor:s.totalPnl>=0?C.green:C.red}}>
+                          <div style={{color:C.gray,fontSize:10,marginBottom:4}}>P&L TOTAL</div>
+                          <div style={{fontSize:26,fontWeight:700,color:s.totalPnl>=0?C.green:C.red}}>{s.totalPnl>=0?"+":""}{s.totalPnl} USDT</div>
+                        </Card>
+
+                        {/* Por estrategia */}
+                        <Card>
+                          <Title>POR ESTRATEGIA</Title>
+                          {Object.entries(s.byT).filter(([,v])=>v.t>0).map(([t,data])=>{
+                            const wr=data.t?data.w/data.t*100:0;
+                            return(
+                              <div key={t} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #1E293B"}}>
+                                <div>
+                                  <div style={{fontWeight:700}}>{t}</div>
+                                  <div style={{color:C.gray,fontSize:11}}>{data.t} ops · P&L: <span style={{color:data.pnl>=0?C.green:C.red,fontWeight:700}}>{data.pnl>=0?"+":""}{data.pnl.toFixed(2)}</span></div>
+                                </div>
+                                <div style={{background:wr>=60?"#0D2818":"#1E0A0A",color:wr>=60?C.green:C.red,padding:"3px 10px",borderRadius:4,fontWeight:700}}>{wr.toFixed(0)}%</div>
+                              </div>
+                            );
+                          })}
+                        </Card>
+
+                        {/* Por par */}
+                        <Card>
+                          <Title>POR PAR</Title>
+                          {Object.entries(s.byP).sort((a,b)=>b[1].t-a[1].t).map(([pair,data])=>{
+                            const wr=data.t?data.w/data.t*100:0;
+                            return(
+                              <div key={pair} style={{marginBottom:10}}>
+                                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                                  <span style={{fontWeight:700}}>{pair}</span>
+                                  <div style={{textAlign:"right"}}>
+                                    <span style={{color:wr>=60?C.green:wr>=40?C.orange:C.red,fontWeight:700}}>{wr.toFixed(0)}% ({data.w}/{data.t})</span>
+                                    <span style={{color:data.pnl>=0?C.green:C.red,fontSize:11,marginLeft:8}}>{data.pnl>=0?"+":""}{data.pnl.toFixed(2)}</span>
+                                  </div>
+                                </div>
+                                <div style={{background:"#0A0F1A",borderRadius:3,height:5}}><div style={{height:"100%",width:`${wr}%`,background:wr>=60?C.green:wr>=40?C.orange:C.red,borderRadius:3}}/></div>
+                              </div>
+                            );
+                          })}
+                        </Card>
+
+                        {/* Historial */}
+                        <Card>
+                          <Title>HISTORIAL</Title>
+                          {diary.map((d,i)=>(
+                            <div key={d.id||i} style={{padding:"8px 0",borderBottom:"1px solid #1E293B"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                <div>
+                                  <span style={{fontWeight:700,color:C.gold}}>{d.pair}</span>
+                                  <span style={{color:d.dir==="LONG"?C.green:C.red,fontSize:11,marginLeft:6}}>{d.dir}</span>
+                                  <span style={{color:C.gray,fontSize:11,marginLeft:6}}>{d.type}</span>
+                                  {d.manual&&<span style={{color:C.orange,fontSize:10,marginLeft:6}}>MANUAL</span>}
+                                </div>
+                                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                                  <span style={{color:d.pnlUSDT>=0?C.green:C.red,fontWeight:700,fontSize:12}}>{d.pnlUSDT>=0?"+":""}{(d.pnlUSDT||0).toFixed(2)}</span>
+                                  <span style={{background:d.result==="SL"||d.result==="MANUAL_LOSS"?"#1E0A0A":"#0D2818",color:d.result==="SL"||d.result==="MANUAL_LOSS"?C.red:C.green,borderRadius:3,padding:"2px 6px",fontSize:10,fontWeight:700}}>{d.result}</span>
+                                  <button onClick={()=>setEditingDiary(editingDiary===d.id?null:d.id)} style={{background:"transparent",border:"1px solid #1E293B",borderRadius:3,padding:"2px 6px",color:C.gray,fontFamily:"inherit",fontSize:10,cursor:"pointer"}}>✏</button>
+                                  <button onClick={()=>{if(window.confirm("¿Eliminar esta operacion?"))saveDiary(diary.filter((_,j)=>j!==i));}} style={{background:"transparent",border:"1px solid #1E293B",borderRadius:3,padding:"2px 6px",color:C.red,fontFamily:"inherit",fontSize:10,cursor:"pointer"}}>✕</button>
+                                </div>
+                              </div>
+                              {editingDiary===d.id&&<EditDiary d={d}/>}
+                            </div>
+                          ))}
+                        </Card>
+
+                        {/* Borrar todo */}
+                        {!confirmClear
+                          ?<button onClick={()=>setConfirmClear(true)} style={{background:"transparent",border:"1px solid #2D3748",borderRadius:6,padding:"8px",color:"#4A5568",fontFamily:"inherit",fontSize:11,cursor:"pointer",width:"100%",marginTop:4}}>Borrar historial completo</button>
+                          :<div style={{background:"#1E0A0A",border:"1px solid #E74C3C",borderRadius:6,padding:12,marginTop:4}}>
+                            <div style={{color:"#E74C3C",fontSize:12,fontWeight:700,marginBottom:10,textAlign:"center"}}>Esta accion es irreversible. ¿Confirmas?</div>
+                            <div style={{display:"flex",gap:8}}>
+                              <button onClick={()=>{saveDiary([]);setConfirmClear(false);}} style={{flex:1,background:"#E74C3C",border:"none",borderRadius:5,padding:"9px",color:"#fff",fontFamily:"inherit",fontSize:12,fontWeight:700,cursor:"pointer"}}>SI, BORRAR TODO</button>
+                              <button onClick={()=>setConfirmClear(false)} style={{flex:1,background:"#0A0F1A",border:"1px solid #1E293B",borderRadius:5,padding:"9px",color:"#6B7280",fontFamily:"inherit",fontSize:12,fontWeight:700,cursor:"pointer"}}>CANCELAR</button>
+                            </div>
+                          </div>
+                        }
+                      </>
+                    );
+                  })()}
+                </>
+              );
             })()}
 
           </div>
