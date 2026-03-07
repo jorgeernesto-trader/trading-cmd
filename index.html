@@ -41,7 +41,7 @@
 
     // ─── API CRYPTO.COM DIRECTA ───────────────────────────────────────────────
     const fetchC = async (pair, tf, count=100) => {
-      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${pair}_USDT&timeframe=${tf}&count=${Math.min(count,300)}`);
+      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${pair}_USDT&timeframe=${tf}&depth=${Math.min(count,300)}`);
       const d = await r.json();
       if (d.code !== 0) throw new Error(d.message || "API error");
       return d.result.data.map(c => ({t:+c.t,o:+c.o,h:+c.h,l:+c.l,c:+c.c,v:+(c.v||0)})).sort((a,b)=>a.t-b.t);
@@ -55,7 +55,7 @@
     // ─── PARSER ───────────────────────────────────────────────────────────────
     const parseMessages = (raw) => {
       const signals = [];
-      const blocks = raw.split(/(?=(?:🟡|🔴|SHORT|LONG|●|Estrategia|👀|⚠️|📉))/g).filter(b => b.trim().length > 10);
+      const blocks = raw.split(/(?=(?:🟡|🔴|SHORT|LONG|👀|⚠️|📉))/g).filter(b => b.trim().length > 10);
       for (const block of blocks) {
         const b = block.trim();
         if (b.includes("RSI VIGILANCIA") || (b.includes("FASE 1") && b.includes("RSI"))) {
