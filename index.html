@@ -41,7 +41,7 @@
 
     // ─── API CRYPTO.COM DIRECTA ───────────────────────────────────────────────
     const fetchC = async (pair, tf, count=100) => {
-      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${pair}_USDT&timeframe=${tf}&depth=${Math.min(count,300)}`);
+      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${pair}_USDT&timeframe=${tf}&count=${Math.min(count,300)}`);
       const d = await r.json();
       if (d.code !== 0) throw new Error(d.message || "API error");
       return d.result.data.map(c => ({t:+c.t,o:+c.o,h:+c.h,l:+c.l,c:+c.c,v:+(c.v||0)})).sort((a,b)=>a.t-b.t);
@@ -148,7 +148,7 @@
       const [btcD, pairD, pair4H] = await Promise.all([
         fetchC("BTC","1D",250),
         fetchC(sig.pair==="BTC"?"ETH":sig.pair,"1D",100),
-        fetchC(sig.pair==="BTC"?"ETH":sig.pair,"4H",100)
+        fetchC(sig.pair==="BTC"?"ETH":sig.pair,"4h",100)
       ]);
       const btcC = btcD.map(c=>c.c);
       const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
@@ -211,8 +211,8 @@
     const analyzeAlerta = async (sig, capital, openPos, mode) => {
       const [btcD, pair4H, pair1H] = await Promise.all([
         fetchC("BTC","1D",250),
-        fetchC(sig.pair,"4H",100),
-        fetchC(sig.pair,"1H",100)
+        fetchC(sig.pair,"4h",100),
+        fetchC(sig.pair,"1h",100)
       ]);
       const btcC = btcD.map(c=>c.c);
       const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
@@ -253,7 +253,7 @@
 
     // ─── ANÁLISIS FASE 3 ──────────────────────────────────────────────────────
     const analyzeFase3 = async (sig, capital, openPos, mode) => {
-      const [btcD, pair4H] = await Promise.all([fetchC("BTC","1D",250), fetchC(sig.pair,"4H",100)]);
+      const [btcD, pair4H] = await Promise.all([fetchC("BTC","1D",250), fetchC(sig.pair,"4h",100)]);
       const btcC=btcD.map(c=>c.c);
       const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
       const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
@@ -300,7 +300,7 @@
     const PAIRS_16=["BTC","ETH","SOL","XRP","ADA","TAO","STX","SUI","NEAR","DOT","INJ","AAVE","AVAX","HBAR","POL","RUNE"];
     const scanPair = async (pair) => {
       try {
-        const [d1,h4]=await Promise.all([fetchC(pair,"1D",50),fetchC(pair,"4H",50)]);
+        const [d1,h4]=await Promise.all([fetchC(pair,"1D",50),fetchC(pair,"4h",50)]);
         const c1=d1.map(c=>c.c), c4=h4.map(c=>c.c), p=c1.at(-1);
         const e200=ema(c1,200).at(-1), e50=ema(c1,50).at(-1), e20=ema(c1,20).at(-1);
         const r1D=rsi(c1).at(-1), r4H=rsi(c4).at(-1), a4H=atr(h4);
