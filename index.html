@@ -41,7 +41,9 @@
 
     // ─── API CRYPTO.COM DIRECTA ───────────────────────────────────────────────
     const fetchC = async (pair, tf, count=100) => {
-      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${pair}_USDT&timeframe=${tf}&count=${Math.min(count,300)}`);
+      const exactTf = tf === "1H" ? "1h" : tf === "4H" ? "4h" : tf === "1D" ? "1D" : tf;
+      const cleanPair = pair.trim();
+      const r = await fetch(`https://api.crypto.com/exchange/v1/public/get-candlestick?instrument_name=${cleanPair}_USDT&timeframe=${exactTf}&count=${Math.min(count,300)}`);
       const d = await r.json();
       if (d.code !== 0) throw new Error(d.message || "API error");
       return d.result.data.map(c => ({t:+c.t,o:+c.o,h:+c.h,l:+c.l,c:+c.c,v:+(c.v||0)})).sort((a,b)=>a.t-b.t);
