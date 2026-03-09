@@ -231,28 +231,72 @@
       const isRanging=isRanging4H||isRanging1H;
       if(openPos>=3) return{verdict:"VETADO",vetoes:["3 posiciones abiertas"],items:[],score:0,minScore:7,data:{currentPrice,rsi4H,rsi1H,atr4H_v,isRanging,btcBiasLive}};
       let score=0; const vetoes=[], items=[];
+      let minScore=7;
+
+      // ── BTC macro (max +3) ────────────────────────────────────────────────
       const btcFavor=(sig.dir==="LONG"&&btcAbove&&!btcInCorr)||(sig.dir==="SHORT"&&(!btcAbove||btcInCorr));
-      const btcNeutral=sig.dir==="LONG"&&btcAbove&&btcInCorr;
-      if(sig.dir==="LONG"&&!btcAbove){vetoes.push("BTC bajista → VETO LONG");items.push({k:"BTC macro (live)",p:0,m:4,s:"VETO",n:`BTC ${btcPrice.toFixed(0)} bajo MM200`});}
-      else if(btcFavor){score+=4;items.push({k:"BTC macro (live)",p:4,m:4,s:"OK",n:`BTC ${btcBiasLive} ✓`});}
-      else if(btcNeutral){score+=2;items.push({k:"BTC macro (live)",p:2,m:4,s:"PARCIAL",n:"BTC en CORRECCIÓN — LONG con cautela +2"});}
-      else{score+=1;items.push({k:"BTC macro (live)",p:1,m:4,s:"PARCIAL",n:`BTC ${btcBiasLive} — contrarian +1`});}
+      const btcCorr=btcAbove&&btcInCorr;
+      const btcContra=(sig.dir==="LONG"&&!btcAbove)||(sig.dir==="SHORT"&&btcAbove&&!btcInCorr);
+      if(btcFavor){
+        score+=3;items.push({k:"BTC macro (live)",p:3,m:3,s:"OK",n:`BTC ${btcBiasLive} ✓`});
+      } else if(btcCorr){
+        score+=2;minScore=Math.max(minScore,8);
+        items.push({k:"BTC macro (live)",p:2,m:3,s:"PARCIAL",n:"BTC en CORRECCIÓN — debilidad temporal, min 8"});
+      } else {
+        score+=1;minScore=Math.max(minScore,9);
+        items.push({k:"BTC macro (live)",p:1,m:3,s:"PENALIZADO",n:`BTC ${btcBiasLive} contradice ${sig.dir} — min 9`});
+      }
       const botBias=sig.btcBias;
       if(botBias&&((botBias==="ALCISTA")!==btcAbove)){
-        items.push({k:"⚠️ Sesgo desactualizado",p:0,m:0,s:"PENALIZADO",n:`Bot: ${botBias} | Live: ${btcBiasLive}`});
+        items.push({k:"Sesgo desactualizado",p:0,m:0,s:"PENALIZADO",n:`Bot: ${botBias} | Live: ${btcBiasLive}`});
       }
-      const pts=sig.cumplidas>=3?3:sig.cumplidas===2?2:1; score+=pts;
-      items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:pts,m:3,s:sig.cumplidas>=2?"OK":"PARCIAL",n:sig.conditions.slice(0,2).join(", ")||"Ver mensaje"});
-      if(sig.priority==="PRIORITARIA"){score+=1;items.push({k:"Alerta PRIORITARIA",p:1,m:1,s:"OK",n:"3-4 condiciones +1"});}
-      const inExtreme1H=sig.dir==="LONG"?rsi1H<40:rsi1H>60;
-      if(inExtreme1H){score+=2;items.push({k:"RSI 1H",p:2,m:2,s:"OK",n:`${rsi1H.toFixed(1)} ${rsiDir4H} zona favorable ✓`});}
-      else{score+=1;items.push({k:"RSI 1H",p:1,m:2,s:"PARCIAL",n:`${rsi1H.toFixed(1)} neutral +1`});}
-      if(isRanging4H) vetoes.push("EMAs entrelazadas 4H → Rango 4H");
-      if(isRanging1H) vetoes.push("EMAs entrelazadas 1H → Rango en entrada");
+
+      // ── Condiciones bot (max +3) ──────────────────────────────────────────
+      if(sig.cumplidas>=3){
+        score+=3;items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:3,m:3,s:"OK",n:sig.conditions.slice(0,2).join(", ")||"3-4 condiciones ✓"});
+      } else if(sig.cumplidas===2){
+        score+=2;score-=1;
+        items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:2,m:3,s:"PARCIAL",n:"Solo 2 condiciones +2 / penalizacion -1"});
+      } else {
+        items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:0,m:3,s:"NO",n:"Menos de 2 condiciones — 0 pts"});
+      }
+
+      // ── RSI 4H (max +1) ───────────────────────────────────────────────────
+      const rsi4Fav=sig.dir==="LONG"?rsi4H<=55:rsi4H>=45;
+      if(rsi4Fav){score+=1;items.push({k:"RSI 4H",p:1,m:1,s:"OK",n:`${rsi4H.toFixed(1)} favorable ✓`});}
+      else{items.push({k:"RSI 4H",p:0,m:1,s:"NO",n:`${rsi4H.toFixed(1)} en contra`});}
+
+      // ── RSI 1H (max +1) ───────────────────────────────────────────────────
+      const rsi1Fav=sig.dir==="LONG"?rsi1H<=55:rsi1H>=45;
+      if(rsi1Fav){score+=1;items.push({k:"RSI 1H",p:1,m:1,s:"OK",n:`${rsi1H.toFixed(1)} favorable ✓`});}
+      else{items.push({k:"RSI 1H",p:0,m:1,s:"NO",n:`${rsi1H.toFixed(1)} en contra`});}
+
+      // ── Estructura EMA 4H (max +1) ────────────────────────────────────────
       const ema4HConfirma=(sig.dir==="SHORT"&&ema20_4H<ema50_4H)||(sig.dir==="LONG"&&ema20_4H>ema50_4H);
-      if(ema4HConfirma){score+=1;items.push({k:"Estructura EMA 4H",p:1,m:1,s:"OK",n:`EMA20 ${sig.dir==="SHORT"?"<":">"} EMA50 confirma ${sig.dir} ✓`});}
-      else{score-=1;items.push({k:"Estructura EMA 4H",p:-1,m:1,s:"PENALIZADO",n:`EMA20 ${sig.dir==="SHORT"?">":"<"} EMA50 contradice ${sig.dir} -1`});}
-      const minScore=7, verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":"POSIBLE";
+      if(ema4HConfirma){score+=1;items.push({k:"Estructura EMA 4H",p:1,m:1,s:"OK",n:`EMA20 ${sig.dir==="SHORT"?"<":">"} EMA50 ✓`});}
+      else{items.push({k:"Estructura EMA 4H",p:0,m:1,s:"NO",n:`EMA20 ${sig.dir==="SHORT"?">":"<"} EMA50 — desfavorable`});}
+
+      // ── Estructura EMA 1H (max +1) ────────────────────────────────────────
+      const ema1HConfirma=(sig.dir==="SHORT"&&ema20_1H<ema50_1H)||(sig.dir==="LONG"&&ema20_1H>ema50_1H);
+      if(ema1HConfirma){score+=1;items.push({k:"Estructura EMA 1H",p:1,m:1,s:"OK",n:`EMA20 ${sig.dir==="SHORT"?"<":">"} EMA50 1H ✓`});}
+      else{items.push({k:"Estructura EMA 1H",p:0,m:1,s:"NO",n:`EMA20 ${sig.dir==="SHORT"?">":"<"} EMA50 1H — desfavorable`});}
+
+      // ── ATR distorsionado (-1) ────────────────────────────────────────────
+      const slDist1H=(atr4H_v*1.5/currentPrice)*100;
+      if(slDist1H>3){score-=1;items.push({k:"ATR distorsionado",p:-1,m:0,s:"PENALIZADO",n:`SL implicado ${slDist1H.toFixed(1)}% > 3% -1`});}
+
+      // ── Rango (veto si ambos, -1 y min 8 si solo uno) ────────────────────
+      if(isRanging4H&&isRanging1H){
+        vetoes.push("EMAs entrelazadas en 1H y 4H — rango confirmado en ambos marcos");
+      } else if(isRanging4H){
+        score-=1;minScore=Math.max(minScore,8);
+        items.push({k:"Rango 4H",p:-1,m:0,s:"PENALIZADO",n:"EMAs entrelazadas 4H — min 8"});
+      } else if(isRanging1H){
+        score-=1;minScore=Math.max(minScore,8);
+        items.push({k:"Rango 1H",p:-1,m:0,s:"PENALIZADO",n:"EMAs entrelazadas 1H — min 8"});
+      }
+
+      const verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":"POSIBLE";
       const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
       const slP=sig.dir==="LONG"?currentPrice-atr4H_v*1.5:currentPrice+atr4H_v*1.5;
       const tp1P=sig.dir==="LONG"?currentPrice+atr4H_v*1.5:currentPrice-atr4H_v*1.5;
