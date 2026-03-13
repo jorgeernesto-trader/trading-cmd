@@ -357,7 +357,7 @@
     const Pill=({c,children})=><span style={{background:c+"22",color:c,borderRadius:4,padding:"2px 7px",fontSize:11,fontWeight:700,marginLeft:4}}>{children}</span>;
     const Btn=({onClick,children,color=C.gold,disabled=false,style={}})=><button onClick={onClick} disabled={disabled} style={{background:disabled?"#333":color,border:"none",borderRadius:6,padding:"10px 14px",color:color===C.gold?"#080B14":"#fff",fontFamily:"'Courier New',monospace",fontSize:12,fontWeight:700,cursor:disabled?"not-allowed":"pointer",letterSpacing:1,...style}}>{children}</button>;
     // ─── RESULTADO DE SEÑAL ───────────────────────────────────────────────────
-    const SignalResult=({result,sig,idx,capital,openPos,mode})=>{
+    const SignalResult=({result,sig,idx,capital,openPos,mode,copied,setCopied})=>{
       if(!result||!result.data) return null;
       const {vetado,vetoMsg,avisos,data}=result;
       const bdr=vetado?C.red:C.green;
@@ -684,7 +684,7 @@
                 {results.map(({sig,result},i)=>(
                   (sig.type==="FASE1"||sig.type==="FASE2")
                     ?<FaseInfoCard key={i} sig={sig}/>
-                    :<SignalResult key={i} sig={sig} result={result} idx={i} capital={capital} openPos={openPos} mode={mode}/>
+                    :<SignalResult key={i} sig={sig} result={result} idx={i} capital={capital} openPos={openPos} mode={mode} copied={copied} setCopied={setCopied}/>
                 ))}
               </>}
             </>}
