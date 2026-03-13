@@ -653,10 +653,7 @@
                   )}
                 </div>
                 <textarea value={raw} onChange={e=>{setRaw(e.target.value);setParsed([]);setResults([]);setParseError("");setCopied({});}}
-                  placeholder={"Pega uno o varios mensajes de Telegram:
-SMT Pro, BMSB, Alertas, RSI Extremo (Fase 1/2/3)
-
-Puedes pegar múltiples mensajes seguidos."}
+                  placeholder={"Pega mensajes del bot (SMT, BMSB, Alertas, Fases 1/2/3). Puedes pegar varios a la vez."}
                   style={{width:"100%",minHeight:150,background:"#060A12",border:`1px solid ${parseError?C.red:C.border}`,borderRadius:8,padding:12,color:C.text,fontFamily:"'Courier New',monospace",fontSize:12,resize:"vertical",outline:"none",boxSizing:"border-box",lineHeight:1.6}}/>
                 {parseError&&<div style={{color:C.red,fontSize:11,marginTop:6}}>⚠️ {parseError}</div>}
                 <Btn onClick={handleParse} style={{width:"100%",marginTop:10}}>🔍 DETECTAR SEÑALES</Btn>
