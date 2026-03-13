@@ -627,7 +627,7 @@
                 const smsg=btcStatus.state==="TENDENCIA ALCISTA"?"✅ LONGs favorables":btcStatus.state==="RECUPERACIÓN"?"⚠️ Contexto mixto":btcStatus.state==="DISTRIBUCIÓN"?"⚠️ Posible techo":btcStatus.state==="TENDENCIA BAJISTA"?"🚫 SHORTs favorables":"⚡ Sin sesgo claro";
                 return<Card style={{borderColor:sc}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <Title style={{margin:0}}>₿ BITCOIN (4H)</Title>
+                    <Title>₿ BITCOIN (4H)</Title>
                     <div style={{background:sbg,borderRadius:5,padding:"4px 10px",color:sc,fontSize:11,fontWeight:700}}>{btcStatus.state} — {smsg}</div>
                   </div>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4}}>
@@ -644,7 +644,7 @@
               {/* ── SECCIÓN 3: Pegar mensajes ── */}
               <Card>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                  <Title style={{margin:0}}>📋 MENSAJES DEL BOT</Title>
+                  <Title>📋 MENSAJES DEL BOT</Title>
                   {(raw||parsed.length>0||results.length>0)&&(
                     <button onClick={()=>{setRaw("");setParsed([]);setResults([]);setParseError("");setCopied({});}}
                       style={{background:"#1A0A0A",border:`1px solid ${C.red}`,borderRadius:5,padding:"4px 12px",color:C.red,fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>
@@ -666,7 +666,7 @@ Puedes pegar múltiples mensajes seguidos."}
               {parsed.length>0&&<>
                 <Card style={{borderColor:C.gold}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <Title style={{margin:0}}>✅ {parsed.length} SEÑAL{parsed.length>1?"ES":""} DETECTADA{parsed.length>1?"S":""}</Title>
+                    <Title>✅ {parsed.length} SEÑAL{parsed.length>1?"ES":""} DETECTADA{parsed.length>1?"S":""}</Title>
                   </div>
                   {parsed.map((s,i)=>(
                     <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
