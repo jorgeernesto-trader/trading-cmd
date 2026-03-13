@@ -57,25 +57,73 @@
     };
 
     // ─── PARSER ───────────────────────────────────────────────────────────────
+    const BTC_STATES = ["TENDENCIA ALCISTA","TENDENCIA BAJISTA","RECUPERACIÓN","DISTRIBUCIÓN","AMBIGUO"];
+
+    const parseBtcState = (b) => {
+      for (const s of BTC_STATES) { if (b.includes(s)) return s; }
+      if (b.includes("BTC: Bajista") || b.includes("bajo EMA200")) return "TENDENCIA BAJISTA";
+      if (b.includes("BTC: Alcista") || b.includes("sobre EMA200")) return "TENDENCIA ALCISTA";
+      return null;
+    };
+
+    const parseConditions = (b) => {
+      // Extrae condiciones separadas por bloque LONG/SHORT
+      const condLong=[], condShort=[];
+      const lines = b.split("\n");
+      let section=null;
+      for (const l of lines) {
+        const lt = l.trim();
+        if (/LONG/i.test(lt) && lt.length < 40) { section="LONG"; continue; }
+        if (/SHORT/i.test(lt) && lt.length < 40) { section="SHORT"; continue; }
+        if (lt.includes("•") || lt.match(/^[✅❌➡️⚠️]/u)) {
+          const clean = lt.replace(/^[•✅❌➡️⚠️\s]+/u,"").trim();
+          if (!clean) continue;
+          if (section==="LONG") condLong.push(clean);
+          else if (section==="SHORT") condShort.push(clean);
+        }
+      }
+      // Fallback: si no hay secciones separadas, todas van al bloque del mensaje
+      if (!condLong.length && !condShort.length) {
+        let inC=false;
+        for (const l of lines) {
+          if(l.includes("Cumplidas")) inC=true;
+          if(l.includes("Pendientes")) inC=false;
+          if(inC && l.includes("•")) {
+            const clean = l.trim().replace(/^•\s*/,"");
+            if (clean) condLong.push(clean);
+          }
+        }
+      }
+      return { condLong, condShort };
+    };
+
     const parseMessages = (raw) => {
       const signals = [];
       const blocks = raw.split(/(?=(?:🟡|🔴|SHORT|LONG|👀|⚠️|📉))/g).filter(b => b.trim().length > 10);
       for (const block of blocks) {
         const b = block.trim();
+
+        // ── FASE 1 ──────────────────────────────────────────────────────────
         if (b.includes("RSI VIGILANCIA") || (b.includes("FASE 1") && b.includes("RSI"))) {
           const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
           const rsiValue = parseFloat((b.match(/RSI[^\d]*([\d.]+)/)||[])[1]);
           const dir = b.includes("sobrecompra") ? "SHORT" : "LONG";
-          if (pair) signals.push({ type:"FASE1", pair, dir, rsiValue, raw:b });
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1]||null;
+          if (pair) signals.push({ type:"FASE1", pair, dir, rsiValue, timeStr, raw:b });
           continue;
         }
+
+        // ── FASE 2 ──────────────────────────────────────────────────────────
         if (b.includes("RSI GIRANDO") || (b.includes("FASE 2") && b.includes("RSI"))) {
           const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
           const rsiVals = [...b.matchAll(/([\d.]+)/g)].map(m=>+m[1]).filter(v=>v>10&&v<100);
           const dir = rsiVals[0] > 50 ? "SHORT" : "LONG";
-          if (pair) signals.push({ type:"FASE2", pair, dir, rsiFrom:rsiVals[0], rsiTo:rsiVals[1], raw:b });
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1]||null;
+          if (pair) signals.push({ type:"FASE2", pair, dir, rsiFrom:rsiVals[0], rsiTo:rsiVals[1], timeStr, raw:b });
           continue;
         }
+
+        // ── FASE 3 ──────────────────────────────────────────────────────────
         if (b.includes("ALERTA RSI EXTREMO") || (b.includes("FASE 3") && b.includes("RSI"))) {
           const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
           const rsiMatch = b.match(/([\d.]+)\s*→\s*([\d.]+)/);
@@ -85,25 +133,41 @@
           const rsiPeak = peakMatch ? +peakMatch[1] : rsiFrom;
           const dir = (rsiTo !== null && rsiTo < 50) ? "LONG" : "SHORT";
           const profundo = b.includes("PROFUNDO");
-          if (pair) signals.push({ type:"FASE3", pair, dir, rsiFrom, rsiTo, rsiPeak, profundo, raw:b });
+          const btcState = parseBtcState(b);
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1]||null;
+          if (pair) signals.push({ type:"FASE3", pair, dir, rsiFrom, rsiTo, rsiPeak, profundo, btcState, timeStr, raw:b });
           continue;
         }
+
+        // ── BMSB ────────────────────────────────────────────────────────────
         if (b.includes("BMSB") || b.includes("Bullmarket")) {
           const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
           const dir = b.includes("LONG") ? "LONG" : "SHORT";
           const banda = parseFloat((b.match(/Banda\s+(?:sup|inf)\s*[.:]\s*([\d.]+)/i)||[])[1]);
-          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1];
-          if (pair) signals.push({ type:"BMSB", pair, dir, banda, timeStr, raw:b });
+          const btcState = parseBtcState(b);
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1]||null;
+          if (pair) signals.push({ type:"BMSB", pair, dir, banda, btcState, timeStr, raw:b });
+
+        // ── ALERTA ESTÁNDAR ─────────────────────────────────────────────────
         } else if (b.includes("MEDIA") || b.includes("PRIORITARIA") || b.includes("Cumplidas")) {
           const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
           const priority = b.includes("PRIORITARIA") ? "PRIORITARIA" : "MEDIA";
-          const dir = b.includes("SHORT") || (b.includes("bajo EMA200") && !b.includes("BTC: Alcista")) ? "SHORT" : "LONG";
-          const cumplidas = parseInt((b.match(/Cumplidas\s*\((\d+)\/4\)/)||[])[1]) || 0;
-          const conditions = []; let inC = false;
-          b.split("\n").forEach(l => { if(l.includes("Cumplidas")) inC=true; if(l.includes("Pendientes")) inC=false; if(inC&&l.includes("•")) conditions.push(l.trim()); });
-          const btcBias = b.includes("BTC: Bajista") || b.includes("bajo EMA200") ? "BAJISTA" : "ALCISTA";
-          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1];
-          if (pair) signals.push({ type:"ALERTA", pair, dir, priority, cumplidas, conditions, btcBias, timeStr, raw:b });
+          // Dirección: busca bloque con más condiciones, o detecta por texto
+          let dir = "LONG";
+          const longCount = (b.match(/LONG/gi)||[]).length;
+          const shortCount = (b.match(/SHORT/gi)||[]).length;
+          if (shortCount > longCount) dir = "SHORT";
+          else if (b.includes("bajo EMA200") && !b.includes("BTC: Alcista")) dir = "SHORT";
+          const cumplidas = parseInt((b.match(/Cumplidas.*?(\d+)\/4/)||[])[1]) || 0;
+          const { condLong, condShort } = parseConditions(b);
+          // Detección del número real de condiciones por lado
+          const condLongN = parseInt((b.match(/LONG.*?\((\d+)\/4\)/s)||[])[1]) || condLong.length;
+          const condShortN = parseInt((b.match(/SHORT.*?\((\d+)\/4\)/s)||[])[1]) || condShort.length;
+          const btcState = parseBtcState(b);
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1]||null;
+          if (pair) signals.push({ type:"ALERTA", pair, dir, priority, cumplidas, condLong, condShort, condLongN, condShortN, btcState, timeStr, raw:b });
+
+        // ── SMT Pro ─────────────────────────────────────────────────────────
         } else if (b.includes("SMT Pro") || b.includes("BOS/CHoCH") || b.includes("CHoCH") || b.includes("Señal")) {
           const pair = (b.match(/([A-Z]{2,10})USDT/)||[])[1];
           const dir = b.includes("LONG") ? "LONG" : "SHORT";
@@ -113,244 +177,156 @@
           const tp3 = parseFloat((b.match(/TP3\s*:\s*([\d.]+)/)||[])[1]);
           const sl = parseFloat((b.match(/SL\s*:\s*([\d.]+)/)||[])[1]);
           const signal = (b.match(/Señal\s*:\s*(\w+)/)||[])[1] || "BOS";
-          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1];
-          if (pair && !isNaN(entry)) signals.push({ type:"SMT", pair, dir, entry, tp1, tp2, tp3, sl, signal, timeStr, raw:b });
+          const btcState = parseBtcState(b);
+          const timeStr = (b.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/)||[])[1]||null;
+          if (pair && !isNaN(entry)) signals.push({ type:"SMT", pair, dir, entry, tp1, tp2, tp3, sl, signal, btcState, timeStr, raw:b });
         }
       }
       return signals;
     };
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
-    const buildOrder = (dir, entryP, slP, tp1P, tp2P, tp3P, riskPct, capital) => {
-      const slDist = Math.abs(entryP - slP) / entryP;
-      const riskUSDT = capital * riskPct;
-      const leverage = Math.min(10, Math.max(1, +(riskPct/slDist).toFixed(1)));
-      const size = riskUSDT / slDist;
-      const atrInflado = slDist > 0.03;
-      return { entry:entryP, sl:slP, tp1:tp1P, tp2:tp2P, tp3:tp3P, leverage, size:+size.toFixed(2), riskUSDT:+riskUSDT.toFixed(2), riskPct, atrInflado };
+    // ─── RESUMEN PARA CLAUDE ──────────────────────────────────────────────────
+    const buildResumen = (sig, result, capital, openPos, mode) => {
+      const d = result.data;
+      const now = new Date();
+
+      // Tiempo transcurrido desde la señal
+      let tiempoStr = "—";
+      if (sig.timeStr) {
+        try {
+          const [dp,tp] = sig.timeStr.split(" ");
+          const [dd,mm,yyyy] = dp.split("/");
+          const sigMs = new Date(`${yyyy}-${mm}-${dd}T${tp}:00Z`).getTime();
+          const diffMs = now.getTime() - sigMs;
+          const hh = Math.floor(diffMs/3600000);
+          const mn = Math.floor((diffMs%3600000)/60000);
+          tiempoStr = hh > 0 ? `${hh}h ${mn}min` : `${mn}min`;
+        } catch(e) { tiempoStr = "—"; }
+      }
+
+      // Condiciones bot
+      const condL = sig.condLong && sig.condLong.length ? sig.condLong.join(", ") : "—";
+      const condS = sig.condShort && sig.condShort.length ? sig.condShort.join(", ") : "—";
+      const condLongN = sig.condLongN != null ? sig.condLongN : (sig.condLong ? sig.condLong.length : 0);
+      const condShortN = sig.condShortN != null ? sig.condShortN : (sig.condShort ? sig.condShort.length : 0);
+
+      // Estado BTC: prioridad al dato live del resultado
+      const btcStateStr = d.btcState || sig.btcState || "—";
+
+      // Avisos
+      const avisoLines = result.avisos && result.avisos.length
+        ? result.avisos.map(a => a.msg).join("\n")
+        : "";
+
+      const f6 = (n) => { if(n==null||isNaN(n)) return "—"; const d=n<0.01?6:n<1?4:n<100?4:2; return n.toFixed(d); };
+
+      const lines = [
+        "---RESUMEN PARA CLAUDE---",
+        `Par: ${sig.pair}USDT`,
+        `Tipo de señal: ${d.sigTypeLabel || sig.type}`,
+        `Dirección sugerida por bot: ${sig.dir} (${sig.dir==="LONG"?condLongN:condShortN}/4 condiciones)`,
+        `Condiciones LONG cumplidas: ${condL}`,
+        `Condiciones SHORT cumplidas: ${condS}`,
+        `Estado BTC 4H: ${btcStateStr}`,
+        `BTC precio: ${d.btcPrice ? d.btcPrice.toFixed(0) : "—"} | EMA200: ${d.btcEma200 ? d.btcEma200.toFixed(0) : "—"}`,
+        `Precio actual ${sig.pair}: ${f6(d.currentPrice)}`,
+        `ATR 4H: ${f6(d.atr4H)} (${d.atrPct != null ? d.atrPct.toFixed(1) : "—"}% del precio)`,
+        `EMA20: ${f6(d.ema20)} | EMA50: ${f6(d.ema50)} | EMA100: ${f6(d.ema100)} | EMA200: ${f6(d.ema200)}`,
+        `RSI 4H actual: ${d.rsi4H != null ? d.rsi4H.toFixed(1) : "—"} ${d.rsiDir4H || ""}`,
+        `Estado EMAs ${sig.pair}: ${d.emaState || "—"}`,
+        `SL mínimo por ruido de mercado (1×ATR): ${f6(d.slRef)} — referencia para Claude`,
+        `Hora de la señal: ${sig.timeStr || "—"}`,
+        `Tiempo transcurrido desde la señal: ${tiempoStr}`,
+        `Capital disponible: ${capital} USDT`,
+        `Modo: ${mode}`,
+        `Posiciones abiertas: ${openPos}`,
+      ];
+      if (avisoLines) lines.push(avisoLines);
+      lines.push("---FIN RESUMEN---");
+      return lines.join("\n");
     };
 
-    const filtroContexto = (sig, result) => {
-      if (!result.order || result.verdict === "VETADO") return null;
-      const { entry, sl, tp1 } = result.order;
-      const current = result.data.currentPrice;
-      const totalDist = Math.abs(tp1 - entry);
-      const recorrido = totalDist > 0 ? Math.abs(current - entry) / totalDist * 100 : 0;
-      const q1Pass = recorrido < 50;
-      const rrCurrent = totalDist > 0 && Math.abs(current - sl) > 0 ? Math.abs(tp1 - current) / Math.abs(current - sl) : 1;
-      const q4Pass = rrCurrent >= 1;
-      return {
-        q1: { auto:true, pass:q1Pass, label:"¿Tren sin pasar?", detail:`Recorrido a TP1: ${recorrido.toFixed(0)}% ${q1Pass?"✓":"→ El tren ya pasó"}` },
-        q2: { auto:false, label:"¿Vela de entrada clara ahora?", detail:"Confirmar en chart" },
-        q3: { auto:false, label:"¿Estructura confirma la señal?", detail:"Verificar en 4H/1D" },
-        q4: { auto:true, pass:q4Pass, label:"¿R:R actual ≥ 1:1?", detail:`R:R: ${rrCurrent.toFixed(2)} ${q4Pass?"✓":"→ R:R insuficiente"}` },
-      };
-    };
+    // ─── ANÁLISIS UNIFICADO ──────────────────────────────────────────────────
+    const analyzeSignal = async (sig, capital, openPos, mode) => {
+      const btc4H = await fetchC("BTC","4h",200);
+      await sleep(200);
+      const pairStr = sig.pair === "BTC" ? "ETH" : sig.pair;
+      const pair4H = await fetchC(pairStr,"4h",150);
 
-    // ─── ANÁLISIS SMT/BMSB ────────────────────────────────────────────────────
-    const analyzeSenal = async (sig, capital, openPos, mode) => {
-      const btcD = await fetchC("BTC","1D",200);
-      await sleep(300);
-      const pairD = await fetchC(sig.pair==="BTC"?"ETH":sig.pair,"1D",100);
-      await sleep(300);
-      const pair4H = await fetchC(sig.pair==="BTC"?"ETH":sig.pair,"4h",100);
-      const btcC = btcD.map(c=>c.c);
-      const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
-      const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
+      // ── BTC 4H ─────────────────────────────────────────────────────────────
+      const btcC = btc4H.map(c=>c.c);
+      const btcE200=ema(btcC,200).at(-1),btcE100=ema(btcC,100).at(-1),btcE50=ema(btcC,50).at(-1),btcE20=ema(btcC,20).at(-1);
+      const btcPrice=btcC.at(-1);
+      let btcState;
+      const nearMM200=Math.abs(btcPrice-btcE200)/btcPrice*100<2;
+      if(nearMM200){btcState="AMBIGUO";}
+      else if(btcPrice>btcE200&&btcE20>btcE50&&btcE50>btcE100){btcState="TENDENCIA ALCISTA";}
+      else if(btcPrice>btcE200&&btcE20<btcE50){btcState="RECUPERACIÓN";}
+      else if(btcPrice<btcE200&&btcE20<btcE50){btcState="TENDENCIA BAJISTA";}
+      else if(btcPrice<btcE200&&btcE20>btcE50){btcState="DISTRIBUCIÓN";}
+      else{btcState="AMBIGUO";}
+
+      // ── Par 4H ─────────────────────────────────────────────────────────────
       const p4C = pair4H.map(c=>c.c);
-      const p4RSI=rsi(p4C), rsiNow=p4RSI.at(-1), rsiPrev=p4RSI.at(-6), rsiDir=rsiNow>rsiPrev?"↑":"↓";
-      const atr4H=atr(pair4H), currentPrice=p4C.at(-1);
-      const ema200_4H=ema(p4C,200).at(-1), ema50_4H=ema(p4C,50).at(-1), ema20_4H=ema(p4C,20).at(-1);
-      const isRanging=Math.abs(ema20_4H-ema50_4H)/currentPrice*100<0.5;
-      let ageHours=0;
-      if(sig.timeStr){const[dp,tp]=sig.timeStr.split(" ");const[d,m,y]=dp.split("/");ageHours=(Date.now()-new Date(`${y}-${m}-${d}T${tp}:00Z`).getTime())/3600000;}
-      const entryRef=sig.entry||currentPrice, atrMult=atr4H>0?Math.abs(currentPrice-entryRef)/atr4H:0;
-      const inExtreme=sig.dir==="LONG"?rsiNow<35:rsiNow>65;
-      const rsiExitPts=sig.dir==="LONG"?Math.max(0,rsiNow-35):Math.max(0,65-rsiNow);
-      const rsiFav=sig.dir==="LONG"?rsiNow<rsiPrev:rsiNow>rsiPrev;
-      let score=0; const vetoes=[], items=[];
-      if(openPos>=3){vetoes.push("3 posiciones abiertas → VETO overtrading");return{verdict:"VETADO",vetoes,items,score:0,minScore:7,data:{btcPrice,btcEMA200,btcAbove,btcInCorr,currentPrice,rsiNow,rsiDir,atr4H,isRanging}};}
-      if(sig.dir==="LONG"){
-        if(!btcAbove){vetoes.push(`BTC ${btcPrice.toFixed(0)} bajo MM200 → VETO LONGs`);}
-        else if(btcInCorr){score+=2;items.push({k:"BTC a favor 1D",p:2,m:3,s:"PARCIAL",n:"Alcista pero EMA20<EMA50 → mín 8/10"});}
-        else{score+=3;items.push({k:"BTC a favor 1D",p:3,m:3,s:"OK",n:`${btcPrice.toFixed(0)} sobre MM200 ✓`});}
-      } else {
-        if(!btcAbove){score+=3;items.push({k:"BTC a favor 1D",p:3,m:3,s:"OK",n:`Bajista ${btcPrice.toFixed(0)}<MM200 ✓`});}
-        else{score+=1;items.push({k:"BTC a favor 1D",p:1,m:3,s:"PARCIAL",n:"BTC alcista — SHORT contrarian +1"});}
+      const currentPrice = p4C.at(-1);
+      const e20=ema(p4C,20).at(-1),e50=ema(p4C,50).at(-1),e100=ema(p4C,100).at(-1),e200=ema(p4C,200).at(-1);
+      const rsiArr=rsi(p4C), rsi4H=rsiArr.at(-1), rsiDir4H=rsi4H>rsiArr.at(-2)?"↑":"↓";
+      const atr4H=atr(pair4H);
+      const atrPct=atr4H/currentPrice*100;
+      const slRef = sig.dir==="LONG" ? currentPrice-atr4H : currentPrice+atr4H;
+
+      // ── Estado EMAs del par ─────────────────────────────────────────────────
+      const spread=(Math.max(e20,e50,e100)-Math.min(e20,e50,e100))/currentPrice;
+      let emaState;
+      if(spread<0.015){emaState="ENTRELAZADAS";}
+      else if(e20>e50&&e50>e100){emaState="ORDENADAS ALCISTAS";}
+      else if(e20<e50&&e50<e100){emaState="ORDENADAS BAJISTAS";}
+      else{emaState="MIXTAS";}
+
+      // ── Tipo de señal ───────────────────────────────────────────────────────
+      const sigTypeLabel = sig.type==="FASE2"?"RSI EXTREMO FASE 2":sig.type==="FASE3"?"RSI EXTREMO FASE 3":"ALERTA ESTÁNDAR";
+
+      // ── Condiciones bot separadas ───────────────────────────────────────────
+      const condDir = sig.conditions||[];
+      const condLong = sig.dir==="LONG" ? condDir : [];
+      const condShort = sig.dir==="SHORT" ? condDir : [];
+
+      // ── Veto duro: rango 4H ─────────────────────────────────────────────────
+      if(spread<0.015){
+        return{vetado:true,vetoMsg:"🚫 VETADO — Rango confirmado en 4H. Las tres EMAs están entrelazadas.",avisos:[],
+          data:{currentPrice,ema20:e20,ema50:e50,ema100:e100,ema200:e200,rsi4H,rsiDir4H,atr4H,atrPct,slRef,emaState,
+            btcPrice,btcEma200:btcE200,btcState,sigTypeLabel,condLong,condShort},sig};
       }
-      if(isRanging) vetoes.push(`EMAs entrelazadas 4H → Rango`);
-      const bosAuto=sig.type==="SMT"?3:2; score+=bosAuto;
-      items.push({k:"Estructura (bot)",p:bosAuto,m:3,s:"OK",n:sig.type==="SMT"?`${sig.signal} detectado ✓`:"Cruce BMSB ✓"});
-      if(sig.type==="SMT"){score+=2;items.push({k:"Rechazo en EMA",p:2,m:2,s:"OK",n:"SMT en zona EMA ✓"});}
-      else{score+=1;items.push({k:"Rechazo en EMA",p:1,m:2,s:"PARCIAL",n:"BMSB banda de valor +1"});}
-      if(inExtreme){score+=2;items.push({k:"RSI 4H",p:2,m:2,s:"OK",n:`${rsiNow.toFixed(1)} ${rsiDir} zona extrema ✓`});}
-      else if(rsiExitPts<10){score+=1;items.push({k:"RSI 4H",p:1,m:2,s:"PENALIZADO",n:`${rsiNow.toFixed(1)} ${rsiDir} salió ${rsiExitPts.toFixed(0)}pts`});}
-      else{if(!rsiFav){vetoes.push(`RSI 4H ${rsiNow.toFixed(1)} gira en contra`);items.push({k:"RSI 4H",p:0,m:2,s:"VETO",n:`${rsiNow.toFixed(1)} momentum cambiado`});}
-      else{score+=1;items.push({k:"RSI 4H",p:1,m:2,s:"PENALIZADO",n:`${rsiNow.toFixed(1)} salió pero favorable`});}}
+
+      // ── Avisos ──────────────────────────────────────────────────────────────
+      const avisos = [];
+
+      if(parseInt(openPos)>=2){
+        avisos.push({type:"overtrading",msg:"⚠️ 2 posiciones abiertas — informa a Claude del estado de cada una antes de pedir análisis. Claude decide si hay trade."});
+      }
+      if(atrPct>3){
+        avisos.push({type:"atr",msg:`⚠️ ATR posiblemente inflado — SL calculado supera el 3% (${atrPct.toFixed(1)}%). Informa a Claude. Claude decide si operar con SL amplio o esperar.`});
+      }
       if(sig.entry){
-        if(atrMult>=3){vetoes.push(`Agotamiento: ${atrMult.toFixed(1)}x ATR`);items.push({k:"Agotamiento ATR",p:-3,m:0,s:"VETO",n:`${atrMult.toFixed(1)}x ATR ≥3x`});}
-        else if(atrMult>=2){score-=2;items.push({k:"Agotamiento ATR",p:-2,m:0,s:"PENALIZADO",n:`${atrMult.toFixed(1)}x ATR`});}
-        else items.push({k:"Agotamiento ATR",p:0,m:0,s:"OK",n:`${atrMult.toFixed(1)}x ATR ✓`});
-      }
-      if(ageHours>4&&atrMult>1) vetoes.push(`Señal ${ageHours.toFixed(1)}h antigua — esperar retest`);
-      const distMacro=Math.abs(currentPrice-ema200_4H)/currentPrice*100;
-      if(distMacro>8){score+=1;items.push({k:"Espacio macro",p:1,m:1,s:"OK",n:`${distMacro.toFixed(1)}% hasta EMA200 ✓`});}
-      else items.push({k:"Espacio macro",p:0,m:1,s:"NO",n:`Solo ${distMacro.toFixed(1)}% margen`});
-      const minScore=btcInCorr?8:7;
-      const verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":score+4>=minScore?"POSIBLE":"VETADO";
-      const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
-      let order=null;
-      if(verdict!=="VETADO"){
-        const entryP=sig.entry||currentPrice;
-        const slP=sig.sl||(sig.dir==="LONG"?entryP-atr4H*1.5:entryP+atr4H*1.5);
-        const tp1P=sig.tp1||(sig.dir==="LONG"?entryP+atr4H*1.5:entryP-atr4H*1.5);
-        const tp2P=sig.tp2||(sig.dir==="LONG"?entryP+atr4H*2.25:entryP-atr4H*2.25);
-        const tp3P=sig.tp3||(sig.dir==="LONG"?entryP+atr4H*3:entryP-atr4H*3);
-        order=buildOrder(sig.dir,entryP,slP,tp1P,tp2P,tp3P,riskPct,capital);
-      }
-      return{verdict,vetoes,items,score,minScore,data:{btcPrice,btcEMA200,btcAbove,btcInCorr,currentPrice,rsiNow,rsiDir,atr4H,isRanging},order};
-    };
-
-    // ─── ANÁLISIS ALERTA ──────────────────────────────────────────────────────
-    const analyzeAlerta = async (sig, capital, openPos, mode) => {
-      const btcD = await fetchC("BTC","1D",200);
-      await sleep(300);
-      const pair4H = await fetchC(sig.pair,"4h",100);
-      await sleep(300);
-      const pair1H = await fetchC(sig.pair,"1h",100);
-      const btcC = btcD.map(c=>c.c);
-      const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
-      const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
-      const btcBiasLive=btcAbove?(btcInCorr?"CORRECCIÓN":"ALCISTA"):"BAJISTA";
-      const p4C=pair4H.map(c=>c.c), p1C=pair1H.map(c=>c.c), currentPrice=p4C.at(-1);
-      const rsi4H=rsi(p4C).at(-1), rsi1H=rsi(p1C).at(-1), rsiDir4H=rsi4H>rsi(p4C).at(-2)?"↑":"↓";
-      const atr4H_v=atr(pair4H), ema20_4H=ema(p4C,20).at(-1), ema50_4H=ema(p4C,50).at(-1);
-      const ema20_1H=ema(p1C,20).at(-1), ema50_1H=ema(p1C,50).at(-1);
-      const isRanging4H=Math.abs(ema20_4H-ema50_4H)/currentPrice*100<0.5;
-      const isRanging1H=Math.abs(ema20_1H-ema50_1H)/currentPrice*100<0.5;
-      const isRanging=isRanging4H||isRanging1H;
-      if(openPos>=3) return{verdict:"VETADO",vetoes:["3 posiciones abiertas"],items:[],score:0,minScore:7,data:{currentPrice,rsi4H,rsi1H,atr4H_v,isRanging,btcBiasLive}};
-      let score=0; const vetoes=[], items=[];
-      let minScore=7;
-
-      // ── BTC macro (max +3) ────────────────────────────────────────────────
-      const btcFavor=(sig.dir==="LONG"&&btcAbove&&!btcInCorr)||(sig.dir==="SHORT"&&(!btcAbove||btcInCorr));
-      const btcCorr=btcAbove&&btcInCorr;
-      const btcContra=(sig.dir==="LONG"&&!btcAbove)||(sig.dir==="SHORT"&&btcAbove&&!btcInCorr);
-      if(btcFavor){
-        score+=3;items.push({k:"BTC macro (live)",p:3,m:3,s:"OK",n:`BTC ${btcBiasLive} ✓`});
-      } else if(btcCorr){
-        score+=2;minScore=Math.max(minScore,8);
-        items.push({k:"BTC macro (live)",p:2,m:3,s:"PARCIAL",n:"BTC en CORRECCIÓN — debilidad temporal, min 8"});
-      } else {
-        score+=1;minScore=Math.max(minScore,9);
-        items.push({k:"BTC macro (live)",p:1,m:3,s:"PENALIZADO",n:`BTC ${btcBiasLive} contradice ${sig.dir} — min 9`});
-      }
-      const botBias=sig.btcBias;
-      if(botBias&&((botBias==="ALCISTA")!==btcAbove)){
-        items.push({k:"Sesgo desactualizado",p:0,m:0,s:"PENALIZADO",n:`Bot: ${botBias} | Live: ${btcBiasLive}`});
+        const origin=sig.entry;
+        const emas=[e20,e50,e100,e200];
+        let targetEMA=null;
+        if(sig.dir==="LONG"){const ab=emas.filter(e=>e>origin).sort((a,b)=>a-b);targetEMA=ab[0]||null;}
+        else{const bl=emas.filter(e=>e<origin).sort((a,b)=>b-a);targetEMA=bl[0]||null;}
+        if(targetEMA){
+          const totalDist=Math.abs(targetEMA-origin);
+          const traveled=sig.dir==="LONG"?(currentPrice-origin):(origin-currentPrice);
+          if(totalDist>0&&traveled>0){
+            const pct=traveled/totalDist*100;
+            if(pct>40) avisos.push({type:"consumed",msg:`⚠️ Señal posiblemente consumida — el precio se alejó un ${pct.toFixed(0)}% del punto de origen. Informa a Claude.`});
+          }
+        }
       }
 
-      // ── Condiciones bot (max +3) ──────────────────────────────────────────
-      if(sig.cumplidas>=3){
-        score+=3;items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:3,m:3,s:"OK",n:sig.conditions.slice(0,2).join(", ")||"3-4 condiciones ✓"});
-      } else if(sig.cumplidas===2){
-        score+=2;score-=1;
-        items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:2,m:3,s:"PARCIAL",n:"Solo 2 condiciones +2 / penalizacion -1"});
-      } else {
-        items.push({k:`Condiciones bot (${sig.cumplidas}/4)`,p:0,m:3,s:"NO",n:"Menos de 2 condiciones — 0 pts"});
-      }
-
-      // ── RSI 4H (max +1) ───────────────────────────────────────────────────
-      const rsi4Fav=sig.dir==="LONG"?rsi4H<=60:rsi4H>=40;
-      if(rsi4Fav){score+=1;items.push({k:"RSI 4H",p:1,m:1,s:"OK",n:`${rsi4H.toFixed(1)} favorable ✓`});}
-      else{items.push({k:"RSI 4H",p:0,m:1,s:"NO",n:`${rsi4H.toFixed(1)} en contra`});}
-
-      // ── RSI 1H (max +1) ───────────────────────────────────────────────────
-      const rsi1Fav=sig.dir==="LONG"?rsi1H<=60:rsi1H>=40;
-      if(rsi1Fav){score+=1;items.push({k:"RSI 1H",p:1,m:1,s:"OK",n:`${rsi1H.toFixed(1)} favorable ✓`});}
-      else{items.push({k:"RSI 1H",p:0,m:1,s:"NO",n:`${rsi1H.toFixed(1)} en contra`});}
-
-      // ── Estructura EMA 4H (max +1) ────────────────────────────────────────
-      const ema4HConfirma=(sig.dir==="SHORT"&&ema20_4H<ema50_4H)||(sig.dir==="LONG"&&ema20_4H>ema50_4H);
-      if(ema4HConfirma){score+=1;items.push({k:"Estructura EMA 4H",p:1,m:1,s:"OK",n:`EMA20 ${sig.dir==="SHORT"?"<":">"} EMA50 ✓`});}
-      else{items.push({k:"Estructura EMA 4H",p:0,m:1,s:"NO",n:`EMA20 ${sig.dir==="SHORT"?">":"<"} EMA50 — desfavorable`});}
-
-      // ── Estructura EMA 1H (max +1) ────────────────────────────────────────
-      const ema1HConfirma=(sig.dir==="SHORT"&&ema20_1H<ema50_1H)||(sig.dir==="LONG"&&ema20_1H>ema50_1H);
-      if(ema1HConfirma){score+=1;items.push({k:"Estructura EMA 1H",p:1,m:1,s:"OK",n:`EMA20 ${sig.dir==="SHORT"?"<":">"} EMA50 1H ✓`});}
-      else{items.push({k:"Estructura EMA 1H",p:0,m:1,s:"NO",n:`EMA20 ${sig.dir==="SHORT"?">":"<"} EMA50 1H — desfavorable`});}
-
-      // ── ATR distorsionado (-1) ────────────────────────────────────────────
-      const slDist1H=(atr4H_v*1.5/currentPrice)*100;
-      if(slDist1H>3){score-=1;items.push({k:"ATR distorsionado",p:-1,m:0,s:"PENALIZADO",n:`SL implicado ${slDist1H.toFixed(1)}% > 3% -1`});}
-
-      // ── Rango (veto si ambos, -1 y min 8 si solo uno) ────────────────────
-      if(isRanging4H&&isRanging1H){
-        vetoes.push("EMAs entrelazadas en 1H y 4H — rango confirmado en ambos marcos");
-      } else if(isRanging4H){
-        score-=1;minScore=Math.max(minScore,8);
-        items.push({k:"Rango 4H",p:-1,m:0,s:"PENALIZADO",n:"EMAs entrelazadas 4H — min 8"});
-      } else if(isRanging1H){
-        score-=1;minScore=Math.max(minScore,8);
-        items.push({k:"Rango 1H",p:-1,m:0,s:"PENALIZADO",n:"EMAs entrelazadas 1H — min 8"});
-      }
-
-      const verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":"POSIBLE";
-      const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
-      const slP=sig.dir==="LONG"?currentPrice-atr4H_v*1.5:currentPrice+atr4H_v*1.5;
-      const tp1P=sig.dir==="LONG"?currentPrice+atr4H_v*1.5:currentPrice-atr4H_v*1.5;
-      const tp2P=sig.dir==="LONG"?currentPrice+atr4H_v*2.25:currentPrice-atr4H_v*2.25;
-      const tp3P=sig.dir==="LONG"?currentPrice+atr4H_v*3:currentPrice-atr4H_v*3;
-      const order=buildOrder(sig.dir,currentPrice,slP,tp1P,tp2P,tp3P,riskPct,capital);
-      return{verdict,vetoes,items,score,minScore,data:{btcPrice,btcAbove,btcInCorr,btcBiasLive,currentPrice,rsi4H,rsi1H,rsiDir4H,atr4H_v,isRanging},order};
-    };
-
-    // ─── ANÁLISIS FASE 3 ──────────────────────────────────────────────────────
-    const analyzeFase3 = async (sig, capital, openPos, mode) => {
-      const btcD = await fetchC("BTC","1D",200);
-      await sleep(300);
-      const pair4H = await fetchC(sig.pair,"4h",100);
-      const btcC=btcD.map(c=>c.c);
-      const btcEMA200=ema(btcC,200).at(-1), btcEMA20=ema(btcC,20).at(-1), btcEMA50=ema(btcC,50).at(-1), btcPrice=btcC.at(-1);
-      const btcAbove=btcPrice>btcEMA200, btcInCorr=btcAbove&&btcEMA20<btcEMA50;
-      const p4C=pair4H.map(c=>c.c), currentPrice=p4C.at(-1);
-      const ema50_4H=ema(p4C,50).at(-1), ema20_4H=ema(p4C,20).at(-1);
-      const atr4H_v=atr(pair4H);
-      const last3Vol=pair4H.slice(-3).map(c=>c.v||0);
-      const volDecreasing=last3Vol.length===3&&last3Vol[0]>last3Vol[1]&&last3Vol[1]>last3Vol[2];
-      const rsiPeak=sig.rsiPeak||sig.rsiFrom||72;
-      const isProfundo=sig.dir==="LONG"?rsiPeak<25:rsiPeak>75;
-      if(openPos>=3) return{verdict:"VETADO",vetoes:["3 posiciones abiertas"],items:[],score:0,minScore:7,data:{currentPrice,atr4H_v}};
-      let score=0; const vetoes=[], items=[];
-      if(sig.dir==="LONG"){
-        if(!btcAbove){vetoes.push("BTC bajista → VETO LONG RSI Extremo");items.push({k:"Sesgo BTC",p:0,m:3,s:"VETO",n:`BTC ${btcPrice.toFixed(0)} bajo MM200`});}
-        else if(btcInCorr){score+=2;items.push({k:"Sesgo BTC",p:2,m:3,s:"PARCIAL",n:"Alcista en corrección +2"});}
-        else{score+=3;items.push({k:"Sesgo BTC",p:3,m:3,s:"OK",n:`BTC alcista ✓`});}
-      } else {
-        if(!btcAbove||btcInCorr){score+=3;items.push({k:"Sesgo BTC",p:3,m:3,s:"OK",n:`BTC ${btcInCorr?"corrección":"bajista"} → SHORT ✓`});}
-        else{score+=1;items.push({k:"Sesgo BTC",p:1,m:3,s:"PARCIAL",n:"BTC alcista — SHORT contrarian +1"});}
-      }
-      const d20=Math.abs(currentPrice-ema20_4H)/currentPrice*100;
-      const d50=Math.abs(currentPrice-ema50_4H)/currentPrice*100;
-      const minD=Math.min(d20,d50);
-      if(minD<0.5){score+=2;items.push({k:"Posición vs EMAs",p:2,m:2,s:"OK",n:`Rechazándose en EMA (${minD.toFixed(2)}%) ✓`});}
-      else if(minD<2){score+=1;items.push({k:"Posición vs EMAs",p:1,m:2,s:"PARCIAL",n:`Cerca de EMA (${minD.toFixed(2)}%) +1`});}
-      else items.push({k:"Posición vs EMAs",p:0,m:2,s:"NO",n:`Sin ref. EMA (${minD.toFixed(2)}%)`});
-      if(isProfundo){score+=2;items.push({k:"Profundidad RSI",p:2,m:2,s:"OK",n:`Pico ${rsiPeak.toFixed(1)} — PROFUNDO ✓`});}
-      else{score+=1;items.push({k:"Profundidad RSI",p:1,m:2,s:"PARCIAL",n:`Pico ${rsiPeak.toFixed(1)} — zona extrema +1`});}
-      items.push({k:"CHoCH 4H (manual)",p:null,m:2,s:"PENDIENTE",n:"Verificar CHoCH en chart"});
-      if(volDecreasing){score+=1;items.push({k:"Volumen",p:1,m:1,s:"OK",n:"Vol decreciente ✓"});}
-      else items.push({k:"Volumen",p:0,m:1,s:"NO",n:"Sin confirmación de volumen"});
-      const minScore=7;
-      const verdict=vetoes.length>0?"VETADO":score>=minScore?"APROBADA":score+2>=minScore?"POSIBLE":"VETADO";
-      const riskPct=mode==="Enfriamiento"?0.005:openPos>=2?0.0133:0.02;
-      const slP=sig.dir==="LONG"?currentPrice-atr4H_v*1.5:currentPrice+atr4H_v*1.5;
-      const tp1P=sig.dir==="LONG"?currentPrice+atr4H_v*1.5:currentPrice-atr4H_v*1.5;
-      const tp2P=sig.dir==="LONG"?currentPrice+atr4H_v*2.25:currentPrice-atr4H_v*2.25;
-      const tp3P=sig.dir==="LONG"?currentPrice+atr4H_v*3:currentPrice-atr4H_v*3;
-      const order=buildOrder(sig.dir,currentPrice,slP,tp1P,tp2P,tp3P,riskPct,capital);
-      return{verdict,vetoes,items,score,minScore,data:{btcPrice,btcAbove,btcInCorr,currentPrice,atr4H_v},order};
+      return{vetado:false,vetoMsg:null,avisos,
+        data:{currentPrice,ema20:e20,ema50:e50,ema100:e100,ema200:e200,rsi4H,rsiDir4H,atr4H,atrPct,slRef,emaState,
+          btcPrice,btcEma200:btcE200,btcState,sigTypeLabel,condLong,condShort},sig};
     };
 
     // ─── SCANNER ──────────────────────────────────────────────────────────────
@@ -375,95 +351,70 @@
     const uid=()=>Math.random().toString(36).slice(2,9);
     const f=(n,dec)=>{if(n==null||isNaN(n))return"—";const d=dec!=null?dec:n<0.01?6:n<1?4:n<100?4:2;return n.toFixed(d);};
     const C={bg:"#080B14",card:"#0F1827",border:"#1E293B",gold:"#F0A500",green:"#2ECC71",red:"#E74C3C",blue:"#3498DB",orange:"#E67E22",gray:"#6B7280",text:"#E8EAF0",purple:"#9B59B6"};
-    const VC={APROBADA:C.green,POSIBLE:C.orange,VETADO:C.red};
-    const VI={APROBADA:"✅",POSIBLE:"⚠️",VETADO:"🚫"};
-
     const Card=({children,style={}})=><div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12,...style}}>{children}</div>;
     const Title=({children})=><div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:12}}>{children}</div>;
     const Row=({k,v,vc})=><div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:"1px solid #1A2235"}}><span style={{color:C.gray,fontSize:11}}>{k}</span><span style={{color:vc||C.text,fontWeight:600,fontSize:12}}>{v}</span></div>;
     const Pill=({c,children})=><span style={{background:c+"22",color:c,borderRadius:4,padding:"2px 7px",fontSize:11,fontWeight:700,marginLeft:4}}>{children}</span>;
     const Btn=({onClick,children,color=C.gold,disabled=false,style={}})=><button onClick={onClick} disabled={disabled} style={{background:disabled?"#333":color,border:"none",borderRadius:6,padding:"10px 14px",color:color===C.gold?"#080B14":"#fff",fontFamily:"'Courier New',monospace",fontSize:12,fontWeight:700,cursor:disabled?"not-allowed":"pointer",letterSpacing:1,...style}}>{children}</button>;
-    const ScoreItem=({item})=>{
-      const col={OK:C.green,VETO:C.red,PENALIZADO:C.orange,PARCIAL:C.gold,PENDIENTE:C.gray,NO:C.red};
-      return<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"6px 0",borderBottom:`1px solid ${C.border}`}}>
-        <div><div style={{color:col[item.s]||C.gray,fontWeight:600,fontSize:12}}>{item.k}</div><div style={{color:C.gray,fontSize:11,marginTop:2}}>{item.n}</div></div>
-        <div style={{color:col[item.s]||C.gray,fontWeight:700,fontSize:14,minWidth:30,textAlign:"right"}}>{item.p===null?"⏳":item.p>0?`+${item.p}`:item.p<0?item.p:item.s==="NO"?"—":"✓"}{item.m>0&&item.p!==null&&<span style={{opacity:.4,fontSize:10}}>/{item.m}</span>}</div>
-      </div>;
-    };
-
-    const FiltroContexto=({sig,result,onConfirmed})=>{
-      const fc=filtroContexto(sig,result);
-      if(!fc) return null;
-      const [q2,setQ2]=useState(false);
-      const [q3,setQ3]=useState(false);
-      const autoFail=!fc.q1.pass||!fc.q4.pass;
-      const allOk=fc.q1.pass&&q2&&q3&&fc.q4.pass;
-      const Qrow=({q,checked,onCheck,auto})=>(
-        <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
-          <div style={{marginTop:2,flexShrink:0}}>
-            {auto?<span style={{fontSize:14}}>{q.pass?"✅":"🚫"}</span>:<input type="checkbox" checked={checked} onChange={e=>onCheck(e.target.checked)} style={{width:16,height:16,cursor:"pointer"}}/>}
-          </div>
-          <div>
-            <div style={{color:auto?(q.pass?C.green:C.red):checked?C.green:C.gray,fontWeight:600,fontSize:12}}>{q.label}</div>
-            <div style={{color:C.gray,fontSize:11}}>{q.detail}</div>
-          </div>
-        </div>
-      );
+    // ─── RESULTADO DE SEÑAL ───────────────────────────────────────────────────
+    const SignalResult=({result,sig,idx,capital,openPos,mode})=>{
+      if(!result||!result.data) return null;
+      const {vetado,vetoMsg,avisos,data}=result;
+      const bdr=vetado?C.red:C.green;
+      const resumen=buildResumen(sig,result,capital,openPos,mode);
+      const isCopied=copied[idx];
+      const doCopy=()=>{
+        navigator.clipboard.writeText(resumen).then(()=>{
+          setCopied(p=>({...p,[idx]:true}));
+          setTimeout(()=>setCopied(p=>({...p,[idx]:false})),2000);
+        });
+      };
+      // Color estado BTC
+      const btcC=data.btcState==="TENDENCIA ALCISTA"?C.green:data.btcState==="TENDENCIA BAJISTA"?C.red:data.btcState==="RECUPERACIÓN"?C.orange:data.btcState==="DISTRIBUCIÓN"?"#9B59B6":C.gray;
       return(
-        <div style={{marginTop:10,background:"#0A0F1A",borderRadius:8,padding:10}}>
-          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>🔍 PASO 2.5 — FILTRO DE CONTEXTO</div>
-          <Qrow q={fc.q1} auto={true}/>
-          <Qrow q={fc.q2} auto={false} checked={q2} onCheck={setQ2}/>
-          <Qrow q={fc.q3} auto={false} checked={q3} onCheck={setQ3}/>
-          <Qrow q={fc.q4} auto={true}/>
-          {autoFail
-            ?<div style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:8,marginTop:10,color:C.red,fontSize:12,fontWeight:700}}>
-              🚫 VETO DE CONTEXTO — {!fc.q1.pass?"El tren ya pasó":"R:R insuficiente"}
-            </div>
-            :<Btn onClick={onConfirmed} disabled={!allOk} color={allOk?"#27AE60":C.gray} style={{width:"100%",marginTop:10}}>
-              {allOk?"⚡ Contexto OK — Abrir posición":"☑️ Confirma las casillas para continuar"}
-            </Btn>}
-        </div>
-      );
-    };
-
-    const SignalResult=({result,sig,onAddPos})=>{
-      const vc=VC[result.verdict]||C.gray;
-      const [showOrder,setShowOrder]=useState(false);
-      return(
-        <div style={{background:C.card,border:`2px solid ${vc}`,borderRadius:10,padding:14,marginBottom:10}}>
+        <div style={{background:C.card,border:`2px solid ${bdr}`,borderRadius:10,padding:14,marginBottom:12}}>
+          {/* ── cabecera ── */}
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div>
-              <span style={{fontWeight:700,color:C.gold,fontSize:14}}>{sig.pair}</span>
+              <span style={{fontWeight:700,color:C.gold,fontSize:15}}>{sig.pair}USDT</span>
               <Pill c={sig.dir==="LONG"?C.green:C.red}>{sig.dir}</Pill>
-              <Pill c={C.blue}>{sig.type}</Pill>
-              {sig.priority&&<Pill c={sig.priority==="PRIORITARIA"?C.red:C.orange}>{sig.priority}</Pill>}
-              {sig.profundo&&<Pill c={C.purple}>PROFUNDO</Pill>}
+              <Pill c={C.blue}>{data.sigTypeLabel||sig.type}</Pill>
             </div>
-            <div style={{textAlign:"right"}}>
-              <div style={{color:vc,fontWeight:700,fontSize:16}}>{VI[result.verdict]} {result.verdict}</div>
-              <div style={{color:C.gray,fontSize:11}}>{result.score}/10 pts</div>
+            {vetado
+              ?<span style={{color:C.red,fontWeight:700,fontSize:12}}>🚫 VETADO</span>
+              :<span style={{color:C.green,fontWeight:700,fontSize:12}}>✅ PASA FILTRO</span>
+            }
+          </div>
+
+          {/* ── veto ── */}
+          {vetado&&<div style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:"8px 10px",marginBottom:10,color:C.red,fontSize:12,fontWeight:700,lineHeight:1.5}}>{vetoMsg}</div>}
+
+          {/* ── avisos ── */}
+          {avisos&&avisos.length>0&&avisos.map((a,i)=>(
+            <div key={i} style={{background:"#1A1000",border:`1px solid ${C.orange}`,borderRadius:6,padding:"7px 10px",marginBottom:6,color:C.orange,fontSize:12,lineHeight:1.4}}>⚠️ {a.msg}</div>
+          ))}
+
+          {/* ── datos del activo ── */}
+          <div style={{background:"#0A0F1A",borderRadius:6,padding:"8px 10px",marginBottom:10}}>
+            <Row k="Precio actual" v={f(data.currentPrice)}/>
+            <Row k="RSI 4H" v={data.rsi4H!=null?`${data.rsi4H.toFixed(1)} ${data.rsiDir4H||""}`.trim():"—"}/>
+            <Row k="ATR 4H" v={data.atr4H!=null?`${f(data.atr4H)} (${data.atrPct.toFixed(1)}%)`:"—"}/>
+            <Row k="SL ref 1×ATR" v={f(data.slRef)} vc={C.orange}/>
+            <Row k="EMA20/50/100/200" v={`${f(data.ema20)} / ${f(data.ema50)} / ${f(data.ema100)} / ${f(data.ema200)}`}/>
+            <Row k="Estado EMAs" v={data.emaState||"—"} vc={data.emaState==="ORDENADAS ALCISTAS"?C.green:data.emaState==="ORDENADAS BAJISTAS"?C.red:C.orange}/>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #1A2235"}}>
+              <span style={{color:C.gray,fontSize:11}}>BTC 4H</span>
+              <span style={{color:btcC,fontWeight:700,fontSize:11}}>{data.btcState||"—"}</span>
             </div>
           </div>
-          {result.vetoes.length>0&&<div style={{background:"#1E0A0A",borderRadius:6,padding:8,marginBottom:8}}>{result.vetoes.map((v,i)=><div key={i} style={{color:C.red,fontSize:11}}>🚫 {v}</div>)}</div>}
-          <div style={{background:"#0A0F1A",borderRadius:6,padding:8,marginBottom:8}}>
-            {[["Precio",f(result.data.currentPrice)],["RSI 4H",`${(result.data.rsiNow||result.data.rsi4H||0).toFixed(1)} ${result.data.rsiDir||result.data.rsiDir4H||""}`],["ATR 4H",f(result.data.atr4H||result.data.atr4H_v)],["Ranging",result.data.isRanging?"⚠️ Sí":"✅ No"]].map(([k,v])=><Row key={k} k={k} v={v}/>)}
-            {result.data.btcBiasLive&&<Row k="BTC (live)" v={result.data.btcBiasLive} vc={result.data.btcAbove?(result.data.btcInCorr?C.orange:C.green):C.red}/>}
-          </div>
-          {result.items.map((item,i)=><ScoreItem key={i} item={item}/>)}
-          {(result.verdict==="APROBADA"||result.verdict==="POSIBLE")&&result.order&&<>
-            <Btn onClick={()=>setShowOrder(!showOrder)} color={result.verdict==="APROBADA"?C.green:C.orange} style={{width:"100%",marginTop:10}}>
-              {showOrder?"Ocultar orden":"📋 Ver orden de entrada"}
+
+          {/* ── bloque resumen ── */}
+          {!vetado&&<>
+            <div style={{color:C.gold,fontSize:10,fontWeight:700,letterSpacing:2,marginBottom:6}}>RESUMEN PARA CLAUDE</div>
+            <pre style={{background:"#060A12",border:`1px solid ${C.border}`,borderRadius:6,padding:"10px 12px",fontSize:10,color:"#A0AEC0",fontFamily:"'Courier New',monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0,marginBottom:8,lineHeight:1.6}}>{resumen}</pre>
+            <Btn onClick={doCopy} color={isCopied?C.green:C.gold} style={{width:"100%"}}>
+              {isCopied?"✅ COPIADO":"📋 COPIAR RESUMEN PARA CLAUDE"}
             </Btn>
-            {showOrder&&<div style={{marginTop:10,background:"#0A0F1A",borderRadius:8,padding:10}}>
-              {result.order.atrInflado&&<div style={{background:"#1E1000",border:`1px solid ${C.orange}`,borderRadius:6,padding:8,marginBottom:10,color:C.orange,fontSize:11,fontWeight:700}}>
-                ⚠️ ATR posiblemente inflado — SL amplio, TPs exigentes. Valora esperar normalización.
-              </div>}
-              {[["Entrada",f(result.order.entry),C.gold],["Stop Loss",f(result.order.sl),C.red],["TP1 (50%)",f(result.order.tp1),C.green],["TP2 (25%)",f(result.order.tp2),C.green],["TP3 (25%)",f(result.order.tp3),C.green],["Apalancamiento",`${result.order.leverage}x`,result.order.leverage>=8?C.red:result.order.leverage>=5?C.orange:C.green],["Tamaño",`${result.order.size} USDT`],["Riesgo",`${(result.order.riskPct*100).toFixed(1)}% = ${result.order.riskUSDT.toFixed(2)} USDT`]].map(([k,v,vc])=><Row key={k} k={k} v={v} vc={vc}/>)}
-              {result.verdict==="APROBADA"
-                ?<FiltroContexto sig={sig} result={result} onConfirmed={()=>onAddPos(sig,result)}/>
-                :<div style={{color:C.orange,fontSize:11,marginTop:10,textAlign:"center"}}>Señal POSIBLE — eleva puntuación antes de entrar</div>}
-            </div>}
           </>}
         </div>
       );
@@ -473,19 +424,13 @@
       const isFase1=sig.type==="FASE1";
       const color=isFase1?C.blue:C.orange;
       const icon=isFase1?"👀":"⚠️";
-      const title=isFase1?"RSI VIGILANCIA — FASE 1":"RSI GIRANDO — FASE 2";
-      const desc=isFase1
-        ?`RSI entró en zona extrema: ${sig.rsiValue?.toFixed(1)||"—"} | Solo observar, sin acción`
-        :`RSI lleva 2 velas girando: ${sig.rsiFrom?.toFixed(1)||"—"} → ${sig.rsiTo?.toFixed(1)||"—"} | Prepararse para Fase 3`;
       return(
         <div style={{background:C.card,border:`2px solid ${color}`,borderRadius:10,padding:14,marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <div><span style={{fontWeight:700,color:C.gold,fontSize:14}}>{sig.pair}</span><Pill c={sig.dir==="LONG"?C.green:C.red}>{sig.dir}</Pill><Pill c={color}>{sig.type}</Pill></div>
             <span style={{fontSize:20}}>{icon}</span>
           </div>
-          <div style={{marginTop:10,padding:8,background:"#0A0F1A",borderRadius:6,color:color,fontSize:12}}>{icon} {title}</div>
-          <div style={{color:C.gray,fontSize:11,marginTop:8}}>{desc}</div>
-          {!isFase1&&<div style={{color:C.orange,fontSize:11,marginTop:6,fontWeight:700}}>→ Si el RSI cruza de vuelta el umbral → FASE 3 con análisis completo</div>}
+          <div style={{marginTop:10,padding:8,background:"#0A0F1A",borderRadius:6,color:color,fontSize:12}}>{icon} {isFase1?"RSI VIGILANCIA — FASE 1":"RSI GIRANDO — FASE 2"} — solo observar</div>
         </div>
       );
     };
@@ -508,6 +453,7 @@
       const [scanning,setScanning]=useState(false);
       const [priceTick,setPriceTick]=useState({});
       const [parseError,setParseError]=useState("");
+      const [copied,setCopied]=useState({});
       const [editingPos,setEditingPos]=useState(null);
       const [showAddManual,setShowAddManual]=useState(false);
       const [editingDiary,setEditingDiary]=useState(null);
@@ -516,8 +462,14 @@
       useEffect(()=>{
         const p=localStorage.getItem("pos_v3"); if(p) setPositions(JSON.parse(p));
         const d=localStorage.getItem("diary_v3"); if(d) setDiary(JSON.parse(d));
+        const cap=localStorage.getItem("capital_v3"); if(cap) setCapital(cap);
+        const m=localStorage.getItem("mode_v3"); if(m) setMode(m);
+        const op=localStorage.getItem("openPos_v3"); if(op) setOpenPos(op);
         loadBTC();
       },[]);
+      useEffect(()=>{localStorage.setItem("capital_v3",capital);},[capital]);
+      useEffect(()=>{localStorage.setItem("mode_v3",mode);},[mode]);
+      useEffect(()=>{localStorage.setItem("openPos_v3",openPos);},[openPos]);
 
       useEffect(()=>{
         if(!positions.length) return;
@@ -530,10 +482,19 @@
 
       const loadBTC=async()=>{
         try{
-          const cs=await fetchC("BTC","1D",250);
+          const cs=await fetchC("BTC","4h",250);
           const cl=cs.map(c=>c.c);
-          const e200=ema(cl,200).at(-1),e20=ema(cl,20).at(-1),e50=ema(cl,50).at(-1),p=cl.at(-1),r=rsi(cl).at(-1);
-          setBtcStatus({price:p,ema200:e200,above:p>e200,inCorr:p>e200&&e20<e50,rsi:r.toFixed(1)});
+          const e200=ema(cl,200).at(-1),e100=ema(cl,100).at(-1),e50=ema(cl,50).at(-1),e20=ema(cl,20).at(-1);
+          const p=cl.at(-1),r=rsi(cl).at(-1);
+          let state;
+          const nearEMA200=Math.abs(p-e200)/p*100<2;
+          if(nearEMA200){state="AMBIGUO";}
+          else if(p>e200&&e20>e50&&e50>e100){state="TENDENCIA ALCISTA";}
+          else if(p>e200&&e20<e50){state="RECUPERACIÓN";}
+          else if(p<e200&&e20<e50){state="TENDENCIA BAJISTA";}
+          else if(p<e200&&e20>e50){state="DISTRIBUCIÓN";}
+          else{state="AMBIGUO";}
+          setBtcStatus({price:p,ema200:e200,ema100:e100,ema50:e50,ema20:e20,above:p>e200,inCorr:p>e200&&e20<e50,rsi:r.toFixed(1),state});
         }catch(e){setBtcStatus({error:true,msg:e.message});}
       };
 
@@ -549,14 +510,11 @@
         setLoading(true);setResults([]);
         const cap=parseFloat(capital)||200,op=parseInt(openPos)||0,res=[];
         for(const sig of parsed){
+          if(sig.type==="FASE1"||sig.type==="FASE2"){res.push({sig,result:null});continue;}
           try{
-            let r;
-            if(sig.type==="FASE1"||sig.type==="FASE2"){r={verdict:"INFO",vetoes:[],items:[],score:0,minScore:0,data:{}};}
-            else if(sig.type==="FASE3"){r=await analyzeFase3(sig,cap,op,mode);}
-            else if(sig.type==="ALERTA"){r=await analyzeAlerta(sig,cap,op,mode);}
-            else{r=await analyzeSenal(sig,cap,op,mode);}
+            const r=await analyzeSignal(sig,cap,op,mode);
             res.push({sig,result:r});
-          }catch(e){res.push({sig,result:{verdict:"VETADO",vetoes:[`Error: ${e.message}`],items:[],score:0,minScore:7,data:{}}});}
+          }catch(e){res.push({sig,result:{vetado:true,vetoMsg:`Error: ${e.message}`,avisos:[],data:{},sig}});}
         }
         setResults(res);setLoading(false);
       };
@@ -572,9 +530,8 @@
         setScanner(res.sort((a,b)=>b.score-a.score));setScanning(false);
       };
 
-      const addPos=(sig,result)=>{
-        const o=result.order;
-        savePos([...positions,{id:uid(),pair:sig.pair,dir:sig.dir,type:sig.type,entry:o.entry,sl:o.sl,tp1:o.tp1,tp2:o.tp2,tp3:o.tp3,leverage:o.leverage,size:o.size,riskUSDT:o.riskUSDT,score:result.score,openedAt:new Date().toISOString(),mode}]);
+      const addPos=(sig,entry,sl,tp1,tp2,tp3,riskUSDT)=>{
+        savePos([...positions,{id:uid(),pair:sig.pair,dir:sig.dir,type:sig.type,entry,sl,tp1,tp2,tp3,riskUSDT,openedAt:new Date().toISOString(),mode}]);
         setTab("positions");
       };
       const updatePos=(id,fields)=>{savePos(positions.map(p=>p.id===id?{...p,...fields}:p));};
@@ -611,13 +568,17 @@
           {/* HEADER */}
           <div style={{background:"linear-gradient(90deg,#0D1321,#111827)",borderBottom:`1px solid ${C.border}`,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
             <div style={{color:C.gold,fontWeight:700,fontSize:14,letterSpacing:2}}>⚡ TRADING CMD v3</div>
-            {btcStatus&&!btcStatus.error
-              ?<div style={{background:btcStatus.above?"#0D2818":"#1E0A0A",border:`1px solid ${btcStatus.above?C.green:C.red}`,borderRadius:6,padding:"3px 10px",fontSize:12,color:btcStatus.above?C.green:C.red,cursor:"pointer",display:"flex",gap:6}} onClick={loadBTC}>
+            {btcStatus&&!btcStatus.error&&(()=>{
+              const bsc=btcStatus.state==="TENDENCIA ALCISTA"?C.green:btcStatus.state==="RECUPERACIÓN"?C.orange:btcStatus.state==="DISTRIBUCIÓN"?C.purple:btcStatus.state==="TENDENCIA BAJISTA"?C.red:C.gray;
+              const bsbg=btcStatus.state==="TENDENCIA ALCISTA"?"#0D2818":btcStatus.state==="RECUPERACIÓN"?"#1A1000":btcStatus.state==="DISTRIBUCIÓN"?"#150A20":btcStatus.state==="TENDENCIA BAJISTA"?"#1E0A0A":"#0A0F1A";
+              const abbr=btcStatus.state==="TENDENCIA ALCISTA"?"BULL":btcStatus.state==="RECUPERACIÓN"?"CORR":btcStatus.state==="DISTRIBUCIÓN"?"DIST":btcStatus.state==="TENDENCIA BAJISTA"?"BEAR":"AMB";
+              return<div style={{background:bsbg,border:`1px solid ${bsc}`,borderRadius:6,padding:"3px 10px",fontSize:12,color:bsc,cursor:"pointer",display:"flex",gap:6}} onClick={loadBTC}>
                 <span>₿ {btcStatus.price.toFixed(0)}</span>
-                <span style={{opacity:.7}}>{btcStatus.above?(btcStatus.inCorr?"CORR":"BULL"):"BEAR"}</span>
+                <span style={{opacity:.7}}>{abbr}</span>
                 <span>↻</span>
-              </div>
-              :<div style={{color:C.gold,fontSize:12,cursor:"pointer"}} onClick={loadBTC}>₿ {btcStatus?.msg||"Cargar BTC"}</div>}
+              </div>;
+            })()}
+            {btcStatus&&btcStatus.error&&<div style={{color:C.gold,fontSize:12,cursor:"pointer"}} onClick={loadBTC}>₿ {btcStatus?.msg||"Cargar BTC"}</div>}
           </div>
 
           {/* TABS */}
@@ -629,57 +590,105 @@
 
             {/* ── SEÑALES ── */}
             {tab==="radar"&&<>
-              {btcStatus&&!btcStatus.error&&<Card>
-                <Title>₿ BITCOIN (1D)</Title>
-                <Row k="Precio" v={btcStatus.price.toFixed(0)}/><Row k="MM200" v={btcStatus.ema200.toFixed(0)}/><Row k="RSI" v={btcStatus.rsi}/>
-                <div style={{marginTop:10,padding:"8px",background:btcStatus.above?(btcStatus.inCorr?"#1A1200":"#0D2818"):"#1E0A0A",borderRadius:6,color:btcStatus.above?(btcStatus.inCorr?C.orange:C.green):C.red,fontSize:12,fontWeight:700,textAlign:"center"}}>
-                  {btcStatus.above?(btcStatus.inCorr?"⚠️ ALCISTA EN CORRECCIÓN — Mín 8/10":"✅ ALCISTA — LONGs con 7/10"):"🚫 BAJISTA — Solo SHORTs"}
+              {/* ── SECCIÓN 1: Inputs del operador (siempre visibles) ── */}
+              <Card>
+                <Title>⚙️ PARÁMETROS DEL OPERADOR</Title>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                  <div>
+                    <div style={{color:C.gray,fontSize:11,marginBottom:4}}>CAPITAL DISPONIBLE (USDT)</div>
+                    <input value={capital} onChange={e=>setCapital(e.target.value)}
+                      style={{width:"100%",background:"#0A0F1A",border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px",color:C.text,fontFamily:"'Courier New',monospace",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+                  </div>
+                  <div>
+                    <div style={{color:C.gray,fontSize:11,marginBottom:4}}>POSICIONES ABIERTAS</div>
+                    <select value={openPos} onChange={e=>setOpenPos(e.target.value)}
+                      style={{width:"100%",background:"#0A0F1A",border:`1px solid ${openPos==="3"?C.red:C.border}`,borderRadius:6,padding:"8px 10px",color:openPos==="3"?C.red:C.text,fontFamily:"'Courier New',monospace",fontSize:13,outline:"none",appearance:"none",boxSizing:"border-box"}}>
+                      <option>0</option><option>1</option><option>2</option><option value="3">3 (MAX)</option>
+                    </select>
+                  </div>
                 </div>
-              </Card>}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  {["Normal","Enfriamiento"].map(m=>(
+                    <div key={m} onClick={()=>setMode(m)} style={{padding:"9px 0",textAlign:"center",borderRadius:6,cursor:"pointer",
+                      background:mode===m?(m==="Normal"?"#0D2818":"#1E0A0A"):"#0A0F1A",
+                      border:`1px solid ${mode===m?(m==="Normal"?C.green:C.red):C.border}`,
+                      color:mode===m?(m==="Normal"?C.green:C.red):C.gray,fontSize:12,fontWeight:700}}>
+                      {m==="Normal"?"✅ NORMAL (riesgo 2%)":"🔴 ENFRIAMIENTO (0.5%)"}
+                    </div>
+                  ))}
+                </div>
+                {openPos==="3"&&<div style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:"7px 10px",marginTop:10,color:C.red,fontSize:12,fontWeight:700}}>🚫 MÁXIMO DE POSICIONES — no abrir nuevas</div>}
+              </Card>
+
+              {/* ── SECCIÓN 2: BTC 4H (solo si cargado) ── */}
+              {btcStatus&&!btcStatus.error&&(()=>{
+                const sc=btcStatus.state==="TENDENCIA ALCISTA"?C.green:btcStatus.state==="RECUPERACIÓN"?C.orange:btcStatus.state==="DISTRIBUCIÓN"?"#9B59B6":btcStatus.state==="TENDENCIA BAJISTA"?C.red:C.gray;
+                const sbg=btcStatus.state==="TENDENCIA ALCISTA"?"#0D2818":btcStatus.state==="RECUPERACIÓN"?"#1A1000":btcStatus.state==="DISTRIBUCIÓN"?"#150A20":btcStatus.state==="TENDENCIA BAJISTA"?"#1E0A0A":"#0A0F1A";
+                const smsg=btcStatus.state==="TENDENCIA ALCISTA"?"✅ LONGs favorables":btcStatus.state==="RECUPERACIÓN"?"⚠️ Contexto mixto":btcStatus.state==="DISTRIBUCIÓN"?"⚠️ Posible techo":btcStatus.state==="TENDENCIA BAJISTA"?"🚫 SHORTs favorables":"⚡ Sin sesgo claro";
+                return<Card style={{borderColor:sc}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <Title style={{margin:0}}>₿ BITCOIN (4H)</Title>
+                    <div style={{background:sbg,borderRadius:5,padding:"4px 10px",color:sc,fontSize:11,fontWeight:700}}>{btcStatus.state} — {smsg}</div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4}}>
+                    {[["Precio",btcStatus.price.toFixed(0)],["EMA200",btcStatus.ema200.toFixed(0)],["EMA50",btcStatus.ema50.toFixed(0)],["EMA20",btcStatus.ema20.toFixed(0)],["RSI 4H",btcStatus.rsi],[" "," "]].map(([k,v])=>(
+                      <div key={k} style={{background:"#060A12",borderRadius:5,padding:"6px 8px"}}>
+                        <div style={{color:C.gray,fontSize:10}}>{k}</div>
+                        <div style={{color:C.text,fontWeight:700,fontSize:12}}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>;
+              })()}
+
+              {/* ── SECCIÓN 3: Pegar mensajes ── */}
               <Card>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                  <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2}}>PEGAR MENSAJES DEL BOT</div>
-                  {raw && <button onClick={()=>{setRaw("");setParsed([]);setResults([]);setParseError("");}} style={{background:"#1A0A0A",border:"1px solid #E74C3C",borderRadius:5,padding:"3px 10px",color:"#E74C3C",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>LIMPIAR</button>}
+                  <Title style={{margin:0}}>📋 MENSAJES DEL BOT</Title>
+                  {(raw||parsed.length>0||results.length>0)&&(
+                    <button onClick={()=>{setRaw("");setParsed([]);setResults([]);setParseError("");setCopied({});}}
+                      style={{background:"#1A0A0A",border:`1px solid ${C.red}`,borderRadius:5,padding:"4px 12px",color:C.red,fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                      🗑 LIMPIAR TODO
+                    </button>
+                  )}
                 </div>
-                <textarea value={raw} onChange={e=>{setRaw(e.target.value);setParsed([]);setResults([]);setParseError("");}}
-                  placeholder={"Pega mensajes de Telegram: SMT, BMSB, alertas, RSI Extremo Fase 1/2/3.\n\nPuedes pegar múltiples mensajes seguidos."}
-                  style={{width:"100%",minHeight:160,background:"#0A0F1A",border:`1px solid ${parseError?C.red:C.border}`,borderRadius:8,padding:12,color:C.text,fontFamily:"'Courier New',monospace",fontSize:12,resize:"vertical",outline:"none",boxSizing:"border-box",lineHeight:1.6}}/>
+                <textarea value={raw} onChange={e=>{setRaw(e.target.value);setParsed([]);setResults([]);setParseError("");setCopied({});}}
+                  placeholder={"Pega uno o varios mensajes de Telegram:
+SMT Pro, BMSB, Alertas, RSI Extremo (Fase 1/2/3)
+
+Puedes pegar múltiples mensajes seguidos."}
+                  style={{width:"100%",minHeight:150,background:"#060A12",border:`1px solid ${parseError?C.red:C.border}`,borderRadius:8,padding:12,color:C.text,fontFamily:"'Courier New',monospace",fontSize:12,resize:"vertical",outline:"none",boxSizing:"border-box",lineHeight:1.6}}/>
                 {parseError&&<div style={{color:C.red,fontSize:11,marginTop:6}}>⚠️ {parseError}</div>}
-                <Btn onClick={handleParse} style={{width:"100%",marginTop:10}}>🔍 DETECTAR MENSAJES</Btn>
+                <Btn onClick={handleParse} style={{width:"100%",marginTop:10}}>🔍 DETECTAR SEÑALES</Btn>
               </Card>
+
+              {/* ── SECCIÓN 4: Señales detectadas + análisis ── */}
               {parsed.length>0&&<>
                 <Card style={{borderColor:C.gold}}>
-                  <Title>✅ {parsed.length} MENSAJE{parsed.length>1?"S":""} DETECTADO{parsed.length>1?"S":""}</Title>
-                  {parsed.map((s,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:`1px solid ${C.border}`}}>
-                    <div>
-                      <span style={{color:C.gold,fontWeight:700}}>{s.pair}</span>
-                      <Pill c={s.dir==="LONG"?C.green:C.red}>{s.dir}</Pill>
-                      <Pill c={s.type==="FASE1"?C.blue:s.type==="FASE2"?C.orange:s.type==="FASE3"?C.purple:C.blue}>{s.type}</Pill>
-                      {s.priority&&<Pill c={s.priority==="PRIORITARIA"?C.red:C.orange}>{s.priority}</Pill>}
-                    </div>
-                    <span style={{color:C.gray,fontSize:11}}>{s.timeStr||"—"}</span>
-                  </div>)}
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:12}}>
-                    <div><div style={{color:C.gray,fontSize:11,marginBottom:4}}>CAPITAL (USDT)</div><input value={capital} onChange={e=>setCapital(e.target.value)} style={{width:"100%",background:"#0A0F1A",border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontFamily:"'Courier New',monospace",fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
-                    <div><div style={{color:C.gray,fontSize:11,marginBottom:4}}>POSICIONES ABIERTAS</div>
-                      <select value={openPos} onChange={e=>setOpenPos(e.target.value)} style={{width:"100%",background:"#0A0F1A",border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontFamily:"'Courier New',monospace",fontSize:13,outline:"none",appearance:"none",boxSizing:"border-box"}}>
-                        <option>0</option><option>1</option><option>2</option><option value="3">3 (MAX)</option>
-                      </select>
-                    </div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <Title style={{margin:0}}>✅ {parsed.length} SEÑAL{parsed.length>1?"ES":""} DETECTADA{parsed.length>1?"S":""}</Title>
                   </div>
-                  <div style={{display:"flex",gap:8,marginTop:10}}>
-                    {["Normal","Enfriamiento"].map(m=><div key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"7px 0",textAlign:"center",borderRadius:6,cursor:"pointer",background:mode===m?(m==="Normal"?"#0D2818":"#1E0A0A"):"#0A0F1A",border:`1px solid ${mode===m?(m==="Normal"?C.green:C.red):C.border}`,color:mode===m?(m==="Normal"?C.green:C.red):C.gray,fontSize:12,fontWeight:700}}>{m==="Normal"?"✅ Normal (2%)":"🔴 Enfriamiento (0.5%)"}</div>)}
-                  </div>
-                  {openPos==="3"&&<div style={{background:"#1E0A0A",border:`1px solid ${C.red}`,borderRadius:6,padding:8,marginTop:10,color:C.red,fontSize:12,fontWeight:700}}>🚫 VETO: 3 posiciones = overtrading</div>}
+                  {parsed.map((s,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
+                      <div>
+                        <span style={{color:C.gold,fontWeight:700,fontSize:13}}>{s.pair}</span>
+                        <Pill c={s.dir==="LONG"?C.green:C.red}>{s.dir}</Pill>
+                        <Pill c={s.type==="FASE1"?C.blue:s.type==="FASE2"?C.orange:s.type==="FASE3"?"#9B59B6":C.blue}>{s.type}</Pill>
+                        {s.priority&&<Pill c={s.priority==="PRIORITARIA"?C.red:C.orange}>{s.priority}</Pill>}
+                      </div>
+                      <span style={{color:C.gray,fontSize:10}}>{s.timeStr||"—"}</span>
+                    </div>
+                  ))}
                   <Btn onClick={handleAnalyze} disabled={loading} color={loading?C.gray:C.gold} style={{width:"100%",marginTop:12}}>
-                    {loading?"⏳ ANALIZANDO...":"⚡ ANALIZAR TODO"}
+                    {loading?"⏳ ANALIZANDO...":"⚡ ANALIZAR SEÑALES"}
                   </Btn>
                 </Card>
-                {results.map(({sig,result},i)=>
+
+                {results.map(({sig,result},i)=>(
                   (sig.type==="FASE1"||sig.type==="FASE2")
                     ?<FaseInfoCard key={i} sig={sig}/>
-                    :<SignalResult key={i} sig={sig} result={result} onAddPos={addPos}/>
-                )}
+                    :<SignalResult key={i} sig={sig} result={result} idx={i} capital={capital} openPos={openPos} mode={mode}/>
+                ))}
               </>}
             </>}
 
